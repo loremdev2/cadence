@@ -13,6 +13,7 @@ import {
 import type { AssistantIntent } from "@/lib/ai/assistant";
 import { computeWeekStats } from "@/lib/scheduling";
 import type {
+  AiSlot,
   AssistantResult,
   CalEvent,
   CalendarMode,
@@ -208,6 +209,41 @@ export function CalendarWorkspace({ viewer }: { viewer: Viewer }) {
     [pending, mode, timeZone, range, events, selectedId],
   );
 
+  const bookSlot = useCallback(
+    async (slot: AiSlot, title: string) => {
+      const response = await fetch("/api/calendar/events", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          mode,
+          title,
+          start: slot.start,
+          end: slot.end,
+          timeZone,
+        }),
+      });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) {
+        throw new Error(payload?.error ?? "Could not add the event.");
+      }
+      setReloadToken((token) => token + 1);
+      calendarRef.current?.gotoDate(new Date(slot.start));
+      return (payload?.htmlLink as string | null) ?? null;
+    },
+    [mode, timeZone],
+  );
+
+  const goLive = useCallback(() => {
+    if (viewer.connected) {
+      setMode("live");
+      setSelectedId(null);
+      return;
+    }
+    window.location.href = viewer.authConfigured
+      ? "/auth/google/start?next=/"
+      : "/login";
+  }, [viewer.connected, viewer.authConfigured]);
+
   const prepareBrief = useCallback(
     async (event: CalEvent) => {
       setBriefLoading(true);
@@ -302,8 +338,12 @@ export function CalendarWorkspace({ viewer }: { viewer: Viewer }) {
           messages={messages}
           pending={pending}
           selectedEvent={selectedEvent}
+          mode={mode}
+          canWrite={viewer.canWrite}
           onAsk={(prompt) => ask(prompt)}
           onJump={jumpTo}
+          onBookSlot={bookSlot}
+          onGoLive={goLive}
         />
       }
       meeting={

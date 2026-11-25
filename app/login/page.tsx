@@ -106,15 +106,15 @@ export default async function LoginPage({
           </h1>
           <p className="mt-5 max-w-[380px] text-[13px] leading-relaxed text-[#CBD6CF]">
             Cadence reads your calendar, finds the gaps that actually exist, and
-            tells you what to do differently — without touching a single event.
+            tells you what to do differently — changing nothing unless you add it.
           </p>
 
           <ul className="mt-8 space-y-4">
             {[
               {
                 icon: ShieldCheck,
-                title: "Read-only by design",
-                body: "Only calendar.events.readonly is requested. Cadence cannot create, edit, invite, or delete.",
+                title: "Writes only when you ask",
+                body: "It can add a window you approve, and nothing else. No edits, no deletes, no invitations.",
               },
               {
                 icon: Sparkles,
@@ -160,8 +160,8 @@ export default async function LoginPage({
               Sign in to Cadence
             </h2>
             <p className="mt-2 text-[12.5px] leading-relaxed text-muted">
-              Connect your Google Calendar read-only, or look around the demo week
-              first. No calendar changes are ever made.
+              Connect your Google Calendar, or look around the demo week first.
+              Nothing changes until you add a suggested window.
             </p>
           </div>
 
@@ -208,7 +208,7 @@ export default async function LoginPage({
           <div className="mt-6 space-y-2.5 border-t border-line pt-5">
             <p className="flex items-start gap-2 text-[11px] leading-relaxed text-muted">
               <ShieldCheck className="mt-0.5 h-3.5 w-3.5 shrink-0 text-spruce" />
-              Requests only read-only calendar access. Tokens stay on the server,
+              Requests calendar event access only. Tokens stay on the server,
               encrypted, and never reach the browser.
             </p>
             <p className="flex items-start gap-2 text-[11px] leading-relaxed text-muted">

@@ -30,7 +30,7 @@ const ERRORS: Record<string, string> = {
   storage_failed:
     "Sign-in worked, but the calendar connection could not be saved. Check the migration and the service-role key.",
   consent_denied:
-    "Google Calendar access was declined. Cadence needs read-only access to show your real week.",
+    "Google Calendar access was declined. Cadence needs calendar access to show your real week.",
   encryption_failed:
     "The Google credential could not be encrypted. Check TOKEN_ENCRYPTION_KEY and try again.",
   oauth_state:
@@ -99,11 +99,13 @@ export default async function SettingsPage({
   const errorMessage = params.error ? ERRORS[params.error] ?? "Something went wrong." : null;
   const justConnected = params.connected === "1";
   const scopeMissing = params.connected === "0";
-  const calendarPermission = viewer.scopes.some(
-    (scope) =>
-      scope === "https://www.googleapis.com/auth/calendar.events.readonly" ||
-      scope === "https://www.googleapis.com/auth/calendar.readonly" ||
-      scope === "https://www.googleapis.com/auth/calendar",
+  const calendarPermission = viewer.scopes.some((scope) =>
+    [
+      "https://www.googleapis.com/auth/calendar.events",
+      "https://www.googleapis.com/auth/calendar.events.readonly",
+      "https://www.googleapis.com/auth/calendar.readonly",
+      "https://www.googleapis.com/auth/calendar",
+    ].includes(scope),
   );
 
   const status = !viewer.signedIn
@@ -153,8 +155,8 @@ export default async function SettingsPage({
         {scopeMissing && !errorMessage && (
           <div className="mt-4 flex items-start gap-2 rounded-xl border border-[#EED9CF] bg-[#FDF4EF] px-3 py-2.5 text-[11.5px] leading-relaxed text-[#7C452C]">
             <CircleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-            Signed in, but read-only calendar permission was not granted. Reconnect
-            and approve the calendar checkbox to see your events.
+            Signed in, but calendar permission was not granted. Reconnect and
+            approve the calendar checkbox to see your events.
           </div>
         )}
         {errorMessage && (
@@ -215,7 +217,7 @@ export default async function SettingsPage({
           <Section
             icon={CalendarCheck2}
             title="Google Calendar"
-            description="Read-only access granted by Google with offline access, so the server can refresh the token without you."
+            description="Calendar event access granted by Google with offline access, so the server can refresh the token without you. Adding a window writes exactly that one event."
           >
             <div className="mb-3 flex items-center justify-between gap-3">
               <Badge variant={status.variant}>{status.label}</Badge>
@@ -239,7 +241,11 @@ export default async function SettingsPage({
                 {viewer.googleEmail ?? <span className="text-muted">—</span>}
               </Row>
               <Row label="Access">
-                {calendarPermission ? "Read-only calendar" : "Not granted"}
+                {!calendarPermission
+                  ? "Not granted"
+                  : viewer.canWrite
+                    ? "Read and write events"
+                    : "Read-only events"}
               </Row>
               <Row label="Connected">
                 {viewer.connectedAt
@@ -257,6 +263,14 @@ export default async function SettingsPage({
               </Row>
             </div>
 
+            {viewer.connected && !viewer.canWrite && (
+              <p className="mt-3 flex items-start gap-2 rounded-xl border border-[#EED9CF] bg-[#FDF4EF] px-3 py-2 text-[11px] leading-relaxed text-[#7C452C]">
+                <CircleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                This connection is read-only, so suggested windows cannot be added.
+                Reconnect to grant write access to events.
+              </p>
+            )}
+
             {viewer.signedIn && viewer.connectionStatus && (
               <div className="mt-3">
                 <DisconnectButton />
@@ -272,8 +286,8 @@ export default async function SettingsPage({
 
             <p className="mt-3 flex items-start gap-1.5 text-[10.5px] leading-relaxed text-muted">
               <ShieldCheck className="mt-0.5 h-3 w-3 shrink-0" />
-              Cadence cannot create, edit, move, delete, or invite. Write scopes are
-              never requested.
+              Cadence adds only a window you approve. It never edits, moves or
+              deletes an event, and it never invites anyone.
             </p>
           </Section>
 
@@ -344,8 +358,8 @@ export default async function SettingsPage({
         </div>
 
         <p className="mt-6 text-[10.5px] leading-relaxed text-muted">
-          This prototype does not modify calendars. Event editing and coworker
-          availability are planned next steps.
+          The app writes to Google only when you add a suggested window. Editing
+          existing events and coworker availability are planned next steps.
         </p>
       </div>
     </main>

@@ -4,16 +4,19 @@ import { useEffect, useRef, useState } from "react";
 import {
   AlertTriangle,
   ArrowUp,
+  Check,
   ChevronRight,
   Clock,
   FileText,
   Info,
+  Plus,
   ShieldCheck,
   Sparkles,
 } from "lucide-react";
 import type { AiConflict, AiSlot, AssistantResult, CalEvent } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 
 export interface ChatMessage {
   id: string;
@@ -27,8 +30,20 @@ interface AssistantPanelProps {
   messages: ChatMessage[];
   pending: boolean;
   selectedEvent: CalEvent | null;
+  mode: "demo" | "live";
+  canWrite: boolean;
   onAsk: (prompt: string) => void;
   onJump: (iso: string) => void;
+  onBookSlot: (slot: AiSlot, title: string) => Promise<string | null>;
+  onGoLive: () => void;
+}
+
+interface BookingContext {
+  live: boolean;
+  canWrite: boolean;
+  onBook: (slot: AiSlot, title: string) => Promise<string | null>;
+  /** Leaves the demo calendar (or starts sign-in) so a window can be written. */
+  onGoLive: () => void;
 }
 
 function AnswerText({ text }: { text: string }) {
@@ -57,41 +72,156 @@ function SlotCard({
   slot,
   best,
   onJump,
+  booking,
 }: {
   slot: AiSlot;
   best: boolean;
   onJump: (iso: string) => void;
+  booking: BookingContext;
 }) {
+  const [open, setOpen] = useState(false);
+  const [title, setTitle] = useState("Focus block");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [added, setAdded] = useState<{ htmlLink: string | null } | null>(null);
+
+  const submit = async () => {
+    const value = title.trim();
+    if (!value || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const htmlLink = await booking.onBook(slot, value);
+      setAdded({ htmlLink });
+      setOpen(false);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not add the event.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
-    <button
-      type="button"
-      onClick={() => onJump(slot.start)}
-      className="group w-full rounded-xl border border-line bg-white p-2.5 text-left transition-all hover:border-spruce/30 hover:shadow-card"
-    >
-      <div className="flex items-center justify-between gap-2">
-        <span className="text-[9.5px] uppercase tracking-[0.14em] text-muted">
-          {slot.dayLabel}
-        </span>
-        {best ? (
-          <Badge variant="spruce">best match</Badge>
-        ) : (
-          <span className="text-[9.5px] text-muted">{slot.minutes} min</span>
-        )}
-      </div>
-      <div className="mt-1 flex items-center justify-between gap-2">
-        <span className="text-[13.5px] font-semibold tabular tracking-tight">
-          {slot.timeLabel}
-        </span>
-        <ChevronRight className="h-3.5 w-3.5 text-muted opacity-0 transition-opacity group-hover:opacity-100" />
-      </div>
-      <p className="mt-0.5 text-[11px] leading-snug text-muted">{slot.reasons[0]}</p>
-      <div className="mt-2 h-[2px] w-full overflow-hidden rounded-full bg-[#F1EEE6]">
-        <div
-          className="h-full rounded-full bg-spruce/60"
-          style={{ width: `${slot.score}%` }}
-        />
-      </div>
-    </button>
+    <div className="rounded-xl border border-line bg-white p-2.5 transition-all hover:border-spruce/30 hover:shadow-card">
+      <button
+        type="button"
+        onClick={() => onJump(slot.start)}
+        className="group w-full text-left"
+      >
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-[9.5px] uppercase tracking-[0.14em] text-muted">
+            {slot.dayLabel}
+          </span>
+          {best ? (
+            <Badge variant="spruce">best match</Badge>
+          ) : (
+            <span className="text-[9.5px] text-muted">{slot.minutes} min</span>
+          )}
+        </div>
+        <div className="mt-1 flex items-center justify-between gap-2">
+          <span className="text-[13.5px] font-semibold tabular tracking-tight">
+            {slot.timeLabel}
+          </span>
+          <ChevronRight className="h-3.5 w-3.5 text-muted opacity-0 transition-opacity group-hover:opacity-100" />
+        </div>
+        <p className="mt-0.5 text-[11px] leading-snug text-muted">{slot.reasons[0]}</p>
+        <div className="mt-2 h-[2px] w-full overflow-hidden rounded-full bg-[#F1EEE6]">
+          <div
+            className="h-full rounded-full bg-spruce/60"
+            style={{ width: `${slot.score}%` }}
+          />
+        </div>
+      </button>
+
+      {added ? (
+        <div className="mt-2 flex items-center gap-1.5 rounded-lg bg-[#F1F7F2] px-2 py-1.5 text-[10.5px] text-[#2F6449]">
+          <Check className="h-3 w-3 shrink-0" />
+          <span className="min-w-0 truncate">Added to Google Calendar</span>
+          {added.htmlLink && (
+            <a
+              href={added.htmlLink}
+              target="_blank"
+              rel="noreferrer"
+              className="ml-auto shrink-0 underline"
+            >
+              Open
+            </a>
+          )}
+        </div>
+      ) : !booking.live ? (
+        <div className="mt-2 space-y-1">
+          <Button
+            size="xs"
+            variant="secondary"
+            className="w-full gap-1"
+            onClick={booking.onGoLive}
+          >
+            <Plus className="h-3 w-3" />
+            Add to Google Calendar
+          </Button>
+          <p className="text-[10px] leading-snug text-muted">
+            The demo calendar is read-only. This opens your live calendar, where you
+            can add the window.
+          </p>
+        </div>
+      ) : !booking.canWrite ? (
+        <a
+          href="/auth/google/start?next=/"
+          className="mt-2 flex items-start gap-1 rounded-lg bg-[#FDF4EF] px-2 py-1.5 text-[10.5px] leading-snug text-[#7C452C] underline decoration-[#E9D3C6] underline-offset-2 hover:text-clay"
+        >
+          <ShieldCheck className="mt-0.5 h-3 w-3 shrink-0" />
+          Your calendar connection is read-only. Reconnect to approve adding events.
+        </a>
+      ) : open ? (
+        <div className="mt-2 space-y-1.5">
+          <input
+            value={title}
+            onChange={(event) => setTitle(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                void submit();
+              }
+            }}
+            maxLength={200}
+            aria-label="Event title"
+            placeholder="Event title"
+            className="w-full rounded-lg border border-line bg-[#FCFBF8] px-2 py-1 text-[11.5px] outline-none focus:border-spruce/40"
+          />
+          <div className="flex gap-1.5">
+            <Button
+              size="xs"
+              className="flex-1"
+              onClick={() => void submit()}
+              disabled={busy || !title.trim()}
+            >
+              {busy ? "Adding…" : `Add ${slot.minutes} min`}
+            </Button>
+            <Button
+              size="xs"
+              variant="ghost"
+              onClick={() => setOpen(false)}
+              disabled={busy}
+            >
+              Cancel
+            </Button>
+          </div>
+          {error && (
+            <p className="text-[10px] leading-snug text-clay">{error}</p>
+          )}
+        </div>
+      ) : (
+        <Button
+          size="xs"
+          variant="ghost"
+          className="mt-1.5 w-full gap-1"
+          onClick={() => setOpen(true)}
+        >
+          <Plus className="h-3 w-3" />
+          Add to Google Calendar
+        </Button>
+      )}
+    </div>
   );
 }
 
@@ -126,9 +256,11 @@ function ConflictCard({ conflict }: { conflict: AiConflict }) {
 function AssistantMessage({
   message,
   onJump,
+  booking,
 }: {
   message: ChatMessage;
   onJump: (iso: string) => void;
+  booking: BookingContext;
 }) {
   if (message.error) {
     return (
@@ -170,10 +302,11 @@ function AssistantMessage({
               slot={slot}
               best={index === 0}
               onJump={onJump}
+              booking={booking}
             />
           ))}
           <p className="px-0.5 text-[10px] text-muted">
-            Click a window to jump to it. Nothing is moved.
+            Click a window to jump to it. Nothing changes until you add one.
           </p>
         </div>
       )}
@@ -199,11 +332,21 @@ export function AssistantPanel({
   messages,
   pending,
   selectedEvent,
+  mode,
+  canWrite,
   onAsk,
   onJump,
+  onBookSlot,
+  onGoLive,
 }: AssistantPanelProps) {
   const [input, setInput] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
+  const booking: BookingContext = {
+    live: mode === "live",
+    canWrite,
+    onBook: onBookSlot,
+    onGoLive,
+  };
 
   useEffect(() => {
     const node = scrollRef.current;
@@ -252,8 +395,8 @@ export function AssistantPanel({
               What should we look at?
             </h2>
             <p className="mt-1.5 text-[12px] leading-relaxed text-muted">
-              I read the range you are viewing and suggest changes you can review. I
-              cannot move, create, or invite anything.
+              I read the range you are viewing and suggest changes you can review.
+              Nothing changes until you add a window yourself.
             </p>
 
             <div className="mt-4 space-y-1.5">
@@ -289,7 +432,12 @@ export function AssistantPanel({
                   </div>
                 </div>
               ) : (
-                <AssistantMessage key={message.id} message={message} onJump={onJump} />
+                <AssistantMessage
+                  key={message.id}
+                  message={message}
+                  onJump={onJump}
+                  booking={booking}
+                />
               ),
             )}
 
@@ -345,7 +493,7 @@ export function AssistantPanel({
         </div>
         <p className="mt-2 flex items-center gap-1 px-1 text-[9.5px] text-muted">
           <ShieldCheck className="h-3 w-3" />
-          Read-only · Cadence won&apos;t change your calendar
+          Cadence writes only the window you add
         </p>
       </form>
     </div>

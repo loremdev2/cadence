@@ -22,6 +22,7 @@ import {
 } from "../timezone";
 import { normalizePreferences } from "../preferences";
 import type {
+  AiSlot,
   AiConflict,
   AssistantIntent,
   AssistantResult,

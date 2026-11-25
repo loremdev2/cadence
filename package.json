@@ -16,6 +16,7 @@
     "@fullcalendar/timegrid": "6.1.19",
     "@openrouter/ai-sdk-provider": "1.5.4",
     "@supabase/supabase-js": "2.45.4",
+    "@vercel/analytics": "^2.0.1",
     "ai": "5.0.292",
     "class-variance-authority": "0.7.1",
     "clsx": "2.1.1",

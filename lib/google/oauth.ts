@@ -1,7 +1,21 @@
-export const CALENDAR_SCOPE =
-  "https://www.googleapis.com/auth/calendar.events.readonly";
+// events (not full `calendar`): lets the app list and insert events without
+// rights over sharing, calendars or settings.
+export const CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar.events";
 
 export const OPENID_SCOPES = ["openid", "email", "profile"];
+
+/** Grants that allow writing events. */
+const CALENDAR_WRITE_SCOPES = [
+  "https://www.googleapis.com/auth/calendar.events",
+  "https://www.googleapis.com/auth/calendar",
+];
+
+/** Grants that allow reading events, including read-only ones. */
+const CALENDAR_READ_SCOPES = [
+  ...CALENDAR_WRITE_SCOPES,
+  "https://www.googleapis.com/auth/calendar.events.readonly",
+  "https://www.googleapis.com/auth/calendar.readonly",
+];
 
 export const CALENDAR_SCOPES = [CALENDAR_SCOPE];
 
@@ -31,12 +45,12 @@ export function googleRedirectUri(appUrl: string) {
 }
 
 export function hasCalendarScope(scopes: string[]) {
-  return scopes.some(
-    (scope) =>
-      scope === CALENDAR_SCOPE ||
-      scope === "https://www.googleapis.com/auth/calendar.readonly" ||
-      scope === "https://www.googleapis.com/auth/calendar",
-  );
+  return scopes.some((scope) => CALENDAR_READ_SCOPES.includes(scope));
+}
+
+/** True only when the grant can also add events. */
+export function hasCalendarWriteScope(scopes: string[]) {
+  return scopes.some((scope) => CALENDAR_WRITE_SCOPES.includes(scope));
 }
 
 export function buildGoogleAuthUrl(params: {

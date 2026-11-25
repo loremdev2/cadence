@@ -40,6 +40,8 @@ export interface Viewer {
   name: string | null;
   avatarUrl: string | null;
   connected: boolean;
+  /** Stored grant includes write access, so events can be added. */
+  canWrite: boolean;
   connectionStatus: string | null;
   googleEmail: string | null;
   connectedAt: string | null;

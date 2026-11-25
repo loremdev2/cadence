@@ -5,6 +5,7 @@ import {
   exchangeRefreshToken,
   GoogleAuthError,
   hasCalendarScope,
+  hasCalendarWriteScope,
 } from "./oauth";
 
 export type CalendarErrorCode =
@@ -81,13 +82,16 @@ async function markStatus(userId: string, status: string, lastError: string | nu
     .eq("user_id", userId);
 }
 
-async function getAccessToken(connection: ConnectionRow): Promise<string> {
+async function getAccessToken(
+  connection: ConnectionRow,
+  options: { write?: boolean } = {},
+): Promise<string> {
   const scopes = connection.scopes ?? [];
   if (connection.status === "revoked" || connection.status === "missing_scope") {
     throw new CalendarError(
       "needs_reconnect",
       connection.status === "missing_scope"
-        ? "Google Calendar permission was not granted. Reconnect and approve read-only calendar access."
+        ? "Google Calendar permission was not granted. Reconnect and approve calendar access."
         : "Google has revoked access. Reconnect your calendar.",
       409,
     );
@@ -95,7 +99,14 @@ async function getAccessToken(connection: ConnectionRow): Promise<string> {
   if (scopes.length > 0 && !hasCalendarScope(scopes)) {
     throw new CalendarError(
       "scope_missing",
-      "The stored Google grant does not include read-only Calendar access. Reconnect to approve it.",
+      "The stored Google grant does not include Calendar event access. Reconnect to approve it.",
+      409,
+    );
+  }
+  if (options.write && scopes.length > 0 && !hasCalendarWriteScope(scopes)) {
+    throw new CalendarError(
+      "scope_missing",
+      "This connection is read-only. Reconnect and approve write access to add events.",
       409,
     );
   }
@@ -315,4 +326,123 @@ export async function listGoogleEvents(
     timeZone,
     calendarEmail: connection.google_email,
   };
+}
+
+/**
+ * Google expects wall-clock time plus an explicit zone for inserts. Sending a
+ * `Z` timestamp together with a named zone makes the event's local time
+ * ambiguous, so the instant is re-rendered in the viewer's zone first.
+ */
+function wallClock(iso: string, timeZone: string): string {
+  const date = new Date(iso);
+  if (!Number.isFinite(date.getTime())) return iso;
+  try {
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone,
+      hourCycle: "h23",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    }).formatToParts(date);
+    const value = (type: string) =>
+      parts.find((part) => part.type === type)?.value ?? "00";
+    return `${value("year")}-${value("month")}-${value("day")}T${value("hour")}:${value("minute")}:${value("second")}`;
+  } catch {
+    return date.toISOString();
+  }
+}
+
+export interface CreateEventInput {
+  title: string;
+  start: string;
+  end: string;
+  timeZone: string;
+  description?: string | null;
+}
+
+export interface CreatedEvent {
+  event: CalEvent;
+  htmlLink: string | null;
+}
+
+/**
+ * Inserts an event on the viewer's primary calendar. No attendees are sent and
+ * Google is told not to mail anyone, so this is a silent write to the owner's
+ * own calendar rather than an invitation.
+ */
+export async function createGoogleEvent(
+  userId: string,
+  input: CreateEventInput,
+): Promise<CreatedEvent> {
+  const connection = await loadConnection(userId);
+  const accessToken = await getAccessToken(connection, { write: true });
+
+  const start = new Date(input.start);
+  const end = new Date(input.end);
+  if (
+    !Number.isFinite(start.getTime()) ||
+    !Number.isFinite(end.getTime()) ||
+    end.getTime() <= start.getTime()
+  ) {
+    throw new CalendarError("api_error", "The new event needs a valid start and end.", 400);
+  }
+
+  const response = await fetch(`${CALENDAR_API}?sendUpdates=none`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      summary: input.title,
+      ...(input.description ? { description: input.description } : {}),
+      start: { dateTime: wallClock(input.start, input.timeZone), timeZone: input.timeZone },
+      end: { dateTime: wallClock(input.end, input.timeZone), timeZone: input.timeZone },
+    }),
+    cache: "no-store",
+  });
+
+  if (response.status === 401) {
+    await markStatus(userId, "error", "Google rejected the access token (401).");
+    throw new CalendarError(
+      "needs_reconnect",
+      "Google rejected the calendar token. Reconnect your calendar.",
+      409,
+    );
+  }
+  if (response.status === 403) {
+    const body = (await response.json().catch(() => null)) as
+      | { error?: { message?: string } }
+      | null;
+    const message = body?.error?.message ?? "Google Calendar API returned 403.";
+    if (/rateLimitExceeded|quotaExceeded|userRateLimitExceeded/i.test(message)) {
+      throw new CalendarError("rate_limited", "Google Calendar rate limit reached. Try again shortly.", 429);
+    }
+    await markStatus(userId, "error", message);
+    throw new CalendarError(
+      "scope_missing",
+      "Google refused to add the event. Reconnect the calendar and approve write access.",
+      403,
+    );
+  }
+  if (!response.ok) {
+    const message = `Google Calendar API error (${response.status}).`;
+    await markStatus(userId, "error", message);
+    throw new CalendarError("api_error", message, 502);
+  }
+
+  const payload = (await response.json()) as GoogleEvent;
+  const event = mapEvent(payload, connection.google_email);
+  if (!event) {
+    throw new CalendarError(
+      "api_error",
+      "Google added the event but did not return its details.",
+      502,
+    );
+  }
+
+  return { event, htmlLink: payload.htmlLink ?? null };
 }

@@ -1,5 +1,5 @@
 import { aiConfigured, AI_MODEL } from "./ai/assistant";
-import { googleOAuthConfigured } from "./google/oauth";
+import { googleOAuthConfigured, hasCalendarWriteScope } from "./google/oauth";
 import { getSession, sessionSecretConfigured } from "./session";
 import { getAdminClient, storageConfigured } from "./supabase/admin";
 import type { Viewer } from "./types";
@@ -13,6 +13,7 @@ export async function getViewer(): Promise<Viewer> {
     name: null,
     avatarUrl: null,
     connected: false,
+    canWrite: false,
     connectionStatus: null,
     googleEmail: null,
     connectedAt: null,
@@ -43,6 +44,8 @@ export async function getViewer(): Promise<Viewer> {
     .eq("user_id", session.userId)
     .maybeSingle();
 
+  const scopes = (connection?.scopes as string[] | null) ?? [];
+
   return {
     ...base,
     signedIn: true,
@@ -51,9 +54,11 @@ export async function getViewer(): Promise<Viewer> {
     name: session.name,
     avatarUrl: session.picture,
     connected: connection?.status === "connected",
+    canWrite:
+      connection?.status === "connected" && hasCalendarWriteScope(scopes),
     connectionStatus: connection?.status ?? null,
     googleEmail: connection?.google_email ?? null,
     connectedAt: connection?.connected_at ?? null,
-    scopes: (connection?.scopes as string[] | null) ?? [],
+    scopes,
   };
 }

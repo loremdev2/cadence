@@ -149,7 +149,7 @@ export async function GET(request: NextRequest) {
       status,
       last_error: calendarOk
         ? null
-        : "Google Calendar permission was not granted. Reconnect and approve read-only calendar access.",
+        : "Google Calendar permission was not granted. Reconnect and approve calendar access.",
       connected_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     },

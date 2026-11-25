@@ -1,4 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server";
+import { isSameOriginRequest } from "@/lib/same-origin";
 import { getSession } from "@/lib/session";
 import { getAdminClient } from "@/lib/supabase/admin";
 
@@ -8,21 +9,11 @@ export const dynamic = "force-dynamic";
 const NO_STORE = { "Cache-Control": "no-store" };
 
 export async function POST(request: NextRequest) {
-  const origin = request.headers.get("origin");
-  if (origin) {
-    try {
-      if (new URL(origin).host !== request.headers.get("host")) {
-        return NextResponse.json(
-          { error: "Cross-origin request refused", code: "forbidden" },
-          { status: 403, headers: NO_STORE },
-        );
-      }
-    } catch {
-      return NextResponse.json(
-        { error: "Cross-origin request refused", code: "forbidden" },
-        { status: 403, headers: NO_STORE },
-      );
-    }
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json(
+      { error: "Cross-origin request refused", code: "forbidden" },
+      { status: 403, headers: NO_STORE },
+    );
   }
 
   const session = await getSession();

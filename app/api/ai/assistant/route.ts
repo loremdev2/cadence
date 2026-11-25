@@ -1,6 +1,9 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { z } from "zod";
-import { runAssistant, type AssistantIntent } from "@/lib/ai/assistant";
+import { aiConfigured, runAssistant, type AssistantIntent } from "@/lib/ai/assistant";
+import { checkAiRateLimit } from "@/lib/ai/rate-limit";
+import { normalizePreferences } from "@/lib/preferences";
+import { getSession } from "@/lib/session";
 import type { CalEvent } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -33,6 +36,34 @@ const eventSchema = z.object({
   attendees: z.array(attendeeSchema).max(120).nullish(),
 });
 
+const preferencesSchema = z
+  .object({
+    workdayStart: z.number().optional(),
+    workdayEnd: z.number().optional(),
+    lunchStart: z.number().optional(),
+    lunchEnd: z.number().optional(),
+    bufferMinutes: z.number().optional(),
+    focusBlockMinutes: z.number().optional(),
+    preferMornings: z.boolean().optional(),
+    protectLunch: z.boolean().optional(),
+    allowWeekends: z.boolean().optional(),
+  })
+  .nullish();
+
+const eventDraftSchema = z
+  .object({
+    title: z.string().min(1).max(200),
+    agenda: z.string().max(5000).optional(),
+    description: z.string().max(5000).optional(),
+    location: z.string().max(500).optional(),
+    attendees: z.array(z.string().email().max(320)).max(100).optional(),
+    requestedDate: z.string().max(20).nullish(),
+    requestedPeriod: z.enum(["morning", "afternoon", "evening"]).nullish(),
+    start: z.string().max(60).nullish(),
+    durationMinutes: z.number().int().min(5).max(720).nullish(),
+  })
+  .nullish();
+
 const bodySchema = z.object({
   prompt: z.string().min(1).max(800),
   mode: z.enum(["demo", "live"]),
@@ -40,7 +71,19 @@ const bodySchema = z.object({
   view: z.object({ start: z.string().max(60), end: z.string().max(60) }),
   events: z.array(eventSchema).max(400),
   eventId: z.string().max(400).nullish(),
-  intent: z.enum(["find_time", "brief", "conflicts", "overview"]).nullish(),
+  intent: z
+    .enum([
+      "find_time",
+      "brief",
+      "conflicts",
+      "overview",
+      "week_plan",
+      "reschedule",
+      "create_event",
+    ])
+    .nullish(),
+  preferences: preferencesSchema,
+  eventDraft: eventDraftSchema,
 });
 
 export async function POST(request: NextRequest) {
@@ -67,6 +110,28 @@ export async function POST(request: NextRequest) {
   }
 
   const data = parsed.data;
+
+  if (aiConfigured()) {
+    const session = await getSession();
+    const forwardedFor = request.headers.get("x-forwarded-for")?.split(",")[0]?.trim();
+    const requesterIp = request.headers.get("x-real-ip")?.trim() || forwardedFor || "anonymous";
+    const principal = session?.userId ? `user:${session.userId}` : `ip:${requesterIp}`;
+    const limit = await checkAiRateLimit(principal);
+    if (!limit.allowed) {
+      return NextResponse.json(
+        {
+          error: "Cadence has reached its AI request limit. Please wait a bit and try again.",
+          code: "rate_limited",
+          retryAfterSeconds: limit.retryAfterSeconds,
+        },
+        {
+          status: 429,
+          headers: { ...NO_STORE, "Retry-After": String(limit.retryAfterSeconds) },
+        },
+      );
+    }
+  }
+
   const events: CalEvent[] = data.events.map((event) => ({
     id: event.id,
     title: event.title,
@@ -99,6 +164,8 @@ export async function POST(request: NextRequest) {
       mode: data.mode,
       eventId: data.eventId ?? null,
       forceIntent: (data.intent ?? null) as AssistantIntent | null,
+      preferences: data.preferences ? normalizePreferences(data.preferences) : null,
+      eventDraft: data.eventDraft ?? null,
     });
 
     return NextResponse.json(result, { headers: NO_STORE });

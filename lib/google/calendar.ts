@@ -361,6 +361,8 @@ export interface CreateEventInput {
   end: string;
   timeZone: string;
   description?: string | null;
+  location?: string | null;
+  attendees?: string[];
 }
 
 export interface CreatedEvent {
@@ -369,9 +371,8 @@ export interface CreatedEvent {
 }
 
 /**
- * Inserts an event on the viewer's primary calendar. No attendees are sent and
- * Google is told not to mail anyone, so this is a silent write to the owner's
- * own calendar rather than an invitation.
+ * Inserts an event on the viewer's primary calendar. Google sends invitations
+ * only when the user explicitly included attendees in the confirmed draft.
  */
 export async function createGoogleEvent(
   userId: string,
@@ -390,7 +391,8 @@ export async function createGoogleEvent(
     throw new CalendarError("api_error", "The new event needs a valid start and end.", 400);
   }
 
-  const response = await fetch(`${CALENDAR_API}?sendUpdates=none`, {
+  const attendeeEmails = [...new Set((input.attendees ?? []).map((email) => email.trim().toLowerCase()).filter(Boolean))];
+  const response = await fetch(`${CALENDAR_API}?sendUpdates=${attendeeEmails.length ? "all" : "none"}`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${accessToken}`,
@@ -399,6 +401,8 @@ export async function createGoogleEvent(
     body: JSON.stringify({
       summary: input.title,
       ...(input.description ? { description: input.description } : {}),
+      ...(input.location ? { location: input.location } : {}),
+      ...(attendeeEmails.length ? { attendees: attendeeEmails.map((email) => ({ email })) } : {}),
       start: { dateTime: wallClock(input.start, input.timeZone), timeZone: input.timeZone },
       end: { dateTime: wallClock(input.end, input.timeZone), timeZone: input.timeZone },
     }),
@@ -440,6 +444,100 @@ export async function createGoogleEvent(
     throw new CalendarError(
       "api_error",
       "Google added the event but did not return its details.",
+      502,
+    );
+  }
+
+  return { event, htmlLink: payload.htmlLink ?? null };
+}
+
+export interface MoveEventInput {
+  eventId: string;
+  start: string;
+  end: string;
+  timeZone: string;
+}
+
+/**
+ * Moves an existing event to a new time. The event keeps its title, guests and
+ * description; only start and end change, and Google is told not to email
+ * anyone. Nothing else about the event is touched.
+ */
+export async function moveGoogleEvent(
+  userId: string,
+  input: MoveEventInput,
+): Promise<CreatedEvent> {
+  const connection = await loadConnection(userId);
+  const accessToken = await getAccessToken(connection, { write: true });
+
+  const start = new Date(input.start);
+  const end = new Date(input.end);
+  if (
+    !Number.isFinite(start.getTime()) ||
+    !Number.isFinite(end.getTime()) ||
+    end.getTime() <= start.getTime()
+  ) {
+    throw new CalendarError("api_error", "The new time needs a valid start and end.", 400);
+  }
+
+  const response = await fetch(
+    `${CALENDAR_API}/${encodeURIComponent(input.eventId)}?sendUpdates=none`,
+    {
+      method: "PATCH",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        start: { dateTime: wallClock(input.start, input.timeZone), timeZone: input.timeZone },
+        end: { dateTime: wallClock(input.end, input.timeZone), timeZone: input.timeZone },
+      }),
+      cache: "no-store",
+    },
+  );
+
+  if (response.status === 401) {
+    await markStatus(userId, "error", "Google rejected the access token (401).");
+    throw new CalendarError(
+      "needs_reconnect",
+      "Google rejected the calendar token. Reconnect your calendar.",
+      409,
+    );
+  }
+  if (response.status === 403) {
+    const body = (await response.json().catch(() => null)) as
+      | { error?: { message?: string } }
+      | null;
+    const message = body?.error?.message ?? "Google Calendar API returned 403.";
+    if (/rateLimitExceeded|quotaExceeded|userRateLimitExceeded/i.test(message)) {
+      throw new CalendarError("rate_limited", "Google Calendar rate limit reached. Try again shortly.", 429);
+    }
+    await markStatus(userId, "error", message);
+    throw new CalendarError(
+      "scope_missing",
+      "Google refused to move the event. Reconnect the calendar and approve write access.",
+      403,
+    );
+  }
+  if (response.status === 404) {
+    throw new CalendarError(
+      "api_error",
+      "That event is no longer on the Google calendar. Reload and try again.",
+      404,
+    );
+  }
+  if (!response.ok) {
+    const message = `Google Calendar API error (${response.status}).`;
+    await markStatus(userId, "error", message);
+    throw new CalendarError("api_error", message, 502);
+  }
+
+  const payload = (await response.json()) as GoogleEvent;
+  const event = mapEvent(payload, connection.google_email);
+  if (!event) {
+    throw new CalendarError(
+      "api_error",
+      "Google moved the event but did not return its details.",
       502,
     );
   }

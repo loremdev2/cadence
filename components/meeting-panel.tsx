@@ -7,11 +7,18 @@ import {
   ExternalLink,
   MapPin,
   RefreshCw,
+  Shuffle,
   Sparkles,
   Users,
   Video,
 } from "lucide-react";
-import type { AssistantResult, CalEvent } from "@/lib/types";
+import type {
+  AssistantResult,
+  BriefSource,
+  CalEvent,
+  RescheduleOption,
+  ReschedulePreview,
+} from "@/lib/types";
 import { cn, initials } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
@@ -22,7 +29,16 @@ interface MeetingPanelProps {
   brief: AssistantResult | null;
   briefLoading: boolean;
   briefError: string | null;
+  reschedule: ReschedulePreview | null;
+  rescheduleLoading: boolean;
+  rescheduleError: string | null;
+  moveNotice: string | null;
+  movingStart: string | null;
+  live: boolean;
+  canMove: boolean;
   onPrepare: (event: CalEvent) => void;
+  onPreviewMove: (event: CalEvent) => void;
+  onMove: (event: CalEvent, option: RescheduleOption) => void;
 }
 
 function durationLabel(minutes: number) {
@@ -39,12 +55,28 @@ const categoryLabel: Record<CalEvent["category"], string> = {
   personal: "Personal",
 };
 
+const sourceLabel: Record<BriefSource, string> = {
+  invite: "invite",
+  attendees: "guest list",
+  calendar: "calendar",
+  inferred: "Cadence",
+};
+
 export function MeetingPanel({
   event,
   brief,
   briefLoading,
   briefError,
+  reschedule,
+  rescheduleLoading,
+  rescheduleError,
+  moveNotice,
+  movingStart,
+  live,
+  canMove,
   onPrepare,
+  onPreviewMove,
+  onMove,
 }: MeetingPanelProps) {
   if (!event) {
     return (
@@ -212,6 +244,13 @@ export function MeetingPanel({
 
         {sections && !briefLoading && (
           <div className="mt-3 space-y-3.5">
+            {brief?.brief?.insufficient && (
+              <p className="rounded-lg border border-[#EFE2C6] bg-[#FBF3E1] px-2.5 py-2 text-[10.5px] leading-relaxed text-[#7A5A1E]">
+                This invite has no agenda or description, so there is not enough
+                information for a real summary. Lines marked “Cadence” are general
+                preparation, not details from the invite.
+              </p>
+            )}
             {sections.map((section) => (
               <section key={section.heading}>
                 <h4 className="text-[9px] font-semibold uppercase tracking-[0.14em] text-muted">
@@ -223,11 +262,26 @@ export function MeetingPanel({
                       key={index}
                       className={cn(
                         "flex gap-1.5 text-[11.5px] leading-relaxed text-ink-soft",
-                        section.heading === "What this is" && "text-[12px]",
+                        section.heading === "Purpose" && "text-[12px]",
                       )}
                     >
                       <span className="mt-[7px] h-1 w-1 shrink-0 rounded-full bg-[#C9C1B2]" />
-                      <span>{item}</span>
+                      <span className="min-w-0">{item.text}</span>
+                      <span
+                        className={cn(
+                          "mt-0.5 ml-auto shrink-0 rounded-full border px-1.5 py-[1px] text-[8px] uppercase tracking-[0.08em]",
+                          item.source === "inferred"
+                            ? "border-[#E2DCCB] text-[#8A8170]"
+                            : "border-[#CFE0D2] bg-[#F3F7F2] text-[#3E6450]",
+                        )}
+                        title={
+                          item.source === "inferred"
+                            ? "Written by Cadence from the invite"
+                            : `Taken from the ${sourceLabel[item.source]}`
+                        }
+                      >
+                        {sourceLabel[item.source]}
+                      </span>
                     </li>
                   ))}
                 </ul>
@@ -243,7 +297,141 @@ export function MeetingPanel({
               Regenerate
             </Button>
             <p className="text-[9.5px] leading-relaxed text-muted">
-              Suggestions only. Cadence cannot edit this event or invite anyone.
+              Every line is labelled with where it came from. Nothing outside this
+              invite was used.
+            </p>
+          </div>
+        )}
+      </div>
+
+      <div className="mt-4 border-t border-line pt-4">
+        <div className="flex items-center justify-between gap-2">
+          <h3 className="text-[9px] font-semibold uppercase tracking-[0.16em] text-muted">
+            What if?
+          </h3>
+          {reschedule && (
+            <span className="text-[9px] text-muted">nothing moves until you confirm</span>
+          )}
+        </div>
+
+        {moveNotice && (
+          <p className="mt-2 rounded-lg bg-[#F1F7F2] px-2.5 py-2 text-[10.5px] leading-relaxed text-[#2F6449]">
+            {moveNotice}
+          </p>
+        )}
+
+        {!reschedule && !rescheduleLoading && (
+          <>
+            <p className="mt-1.5 text-[11.5px] leading-relaxed text-muted">
+              See where this meeting could move, and what each option would fix or
+              create.
+            </p>
+            <Button
+              size="sm"
+              variant="secondary"
+              className="mt-2.5 w-full gap-1.5"
+              onClick={() => onPreviewMove(event)}
+            >
+              <Shuffle className="h-3.5 w-3.5" />
+              Preview alternatives
+            </Button>
+            {!live && (
+              <p className="mt-1.5 text-[10px] leading-relaxed text-muted">
+                Previews work on the demo week; switching to your live calendar lets
+                you confirm a move.
+              </p>
+            )}
+          </>
+        )}
+
+        {rescheduleLoading && (
+          <div className="mt-2.5 space-y-2">
+            <Skeleton className="h-14 w-full" />
+            <Skeleton className="h-14 w-full" />
+          </div>
+        )}
+
+        {rescheduleError && !rescheduleLoading && (
+          <div className="mt-2.5 rounded-lg border border-[#EED9CF] bg-[#FDF3EE] p-2.5 text-[11px] leading-relaxed text-[#7C452C]">
+            {rescheduleError}
+          </div>
+        )}
+
+        {reschedule && !rescheduleLoading && (
+          <div className="mt-2.5 space-y-2">
+            <p className="text-[10.5px] text-muted">
+              Currently {reschedule.currentLabel}
+            </p>
+            {reschedule.options.length === 0 && (
+              <p className="rounded-lg border border-line bg-[#FCFBF8] px-2.5 py-2 text-[11px] leading-relaxed text-muted">
+                No clean alternative inside your working hours. Shortening the meeting
+                or widening the dates would give me options.
+              </p>
+            )}
+            {reschedule.options.map((option) => (
+              <div
+                key={option.start}
+                className="rounded-xl border border-line bg-white p-2.5"
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[9.5px] uppercase tracking-[0.14em] text-muted">
+                    {option.dayLabel}
+                  </span>
+                  <span className="text-[9.5px] text-muted">{option.minutes} min</span>
+                </div>
+                <div className="mt-0.5 text-[13px] font-semibold tabular tracking-tight">
+                  {option.timeLabel}
+                </div>
+                <div className="mt-1 space-y-1">
+                  {option.fixes.map((fix) => (
+                    <p
+                      key={`fix-${fix}`}
+                      className="text-[10.5px] leading-snug text-[#2F6449]"
+                    >
+                      Fixes {fix}
+                    </p>
+                  ))}
+                  {option.creates.map((created) => (
+                    <p
+                      key={`create-${created}`}
+                      className="text-[10.5px] leading-snug text-clay"
+                    >
+                      Creates {created}
+                    </p>
+                  ))}
+                  {option.fixes.length === 0 && option.creates.length === 0 && (
+                    <p className="text-[10.5px] leading-snug text-muted">
+                      No other collisions either way.
+                    </p>
+                  )}
+                </div>
+                {canMove ? (
+                  <Button
+                    size="xs"
+                    className="mt-2 w-full"
+                    disabled={movingStart === option.start}
+                    onClick={() => onMove(event, option)}
+                  >
+                    {movingStart === option.start ? "Moving…" : "Move here"}
+                  </Button>
+                ) : live ? (
+                  <a
+                    href="/auth/google/start?next=/calendar"
+                    className="mt-2 block rounded-lg bg-[#FDF4EF] px-2 py-1.5 text-[10.5px] leading-snug text-[#7C452C] underline decoration-[#E9D3C6] underline-offset-2"
+                  >
+                    Your connection is read-only. Reconnect to approve moving events.
+                  </a>
+                ) : (
+                  <p className="mt-2 text-[10px] text-muted">
+                    The demo calendar is read-only. Switch to your live calendar to move
+                    it.
+                  </p>
+                )}
+              </div>
+            ))}
+            <p className="text-[9.5px] leading-relaxed text-muted">
+              A move changes only the time. The title, guests and description stay as
+              they are, and Google sends no notifications.
             </p>
           </div>
         )}

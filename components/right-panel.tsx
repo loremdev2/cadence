@@ -31,6 +31,7 @@ export function RightPanel({
 
   return (
     <aside
+      data-tour="assistant-panel"
       className={cn(
         "flex h-full min-h-0 flex-col border-l border-line bg-panel",
         className,

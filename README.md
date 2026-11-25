@@ -1,6 +1,6 @@
 # Cadence — calendar intelligence
 
-A Next.js app that reads a Google Calendar and suggests how to improve the week: open focus time, meeting briefs, and conflict fixes. Every result is a suggestion; the only write is a window you explicitly add, which becomes one event on your own calendar.
+A Next.js app that reads a Google Calendar and suggests how to improve the week: open focus time, meeting briefs, conflict fixes, and alternative times for an existing meeting. Calendar changes happen only after you explicitly choose an action.
 
 **Demo mode works with no credentials at all.** The calendar, slot finder, conflict detector and assistant all run against a seeded business week until you connect a real calendar.
 
@@ -39,6 +39,9 @@ Copy `.env.example` to `.env.local` and fill only what you have. Each block unlo
 | `TOKEN_ENCRYPTION_KEY` | `openssl rand -base64 32` | encryption of stored tokens |
 | `OPENROUTER_API_KEY` | openrouter.ai → Keys (**server only**) | LLM explanations and briefs |
 | `OPENROUTER_MODEL` | any model id from openrouter.ai/models | pins the model |
+| `AI_RATE_LIMIT_PER_MINUTE` | optional server setting | per-user/demo-IP AI request cap (default 10) |
+| `AI_RATE_LIMIT_PER_DAY` | optional server setting | per-user/demo-IP daily cap (default 50) |
+| `AI_RATE_LIMIT_GLOBAL_PER_DAY` | optional server setting | shared daily AI-key cap (default 500) |
 | `NEXT_PUBLIC_APP_URL` | `http://localhost:3000` / your Vercel URL | OAuth redirect URI |
 
 Never prefix a secret with `NEXT_PUBLIC_`. Never commit `.env.local`.
@@ -57,7 +60,7 @@ Signing out clears the cookie. Changing `SESSION_SECRET` invalidates every sessi
 Supabase is only the database here.
 
 1. Create a project at supabase.com.
-2. **SQL Editor**: run `supabase/migrations/0001_calendar_connections.sql`.
+2. **SQL Editor**: run `supabase/migrations/0001_calendar_connections.sql` and `supabase/migrations/0002_ai_rate_limits.sql`.
 3. Copy the **project URL** and **service-role key** into `.env.local` as `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`.
 
 Do **not** enable Supabase Auth, and do not add redirect URLs there — Google returns to this app directly. The migration creates `app_users` and `calendar_connections`, enables RLS on both with zero policies, and revokes all access from `anon` and `authenticated`, so only the service role (server code) can read them.
@@ -92,6 +95,8 @@ The default is a free model, so no credits are needed. Free ids end in `:free`; 
 
 Without a key the app still works: slots and conflicts are computed in code and the copy falls back to deterministic text. The UI shows “heuristic mode” rather than pretending a model answered.
 
+The AI endpoint is rate-limited to 10 requests per minute and 50 per day per signed-in user (or demo visitor IP), with a shared cap of 500 requests per day. The Supabase migration stores atomic counters across server instances. If Supabase is not configured, the limiter falls back to process-local counters; set the three `AI_RATE_LIMIT_*` variables to change the limits.
+
 Free models are rate-limited per account: 20 requests a minute and 50 a day until the account has bought $10 of credits lifetime, then 1000 a day. Each answer costs two requests (interpretation plus narration), so a token-free account gets roughly 25 answers a day. Hitting the cap is not an error — the answer falls back to the deterministic copy and the server logs `assistant narration fell back to template`.
 
 ## Deploy
@@ -104,9 +109,9 @@ Free models are rate-limited per account: 20 requests a minute and 50 a day unti
 
 ## How suggestions are generated
 
-1. **Interpret the request** — OpenRouter returns intent, duration and date bounds; a regex parser takes over when the key is absent or the call fails.
-2. **Compute** — `lib/scheduling.ts` finds gaps in 09:00–18:00 local time, protects lunch, scores slots, and detects overlaps, back-to-back runs, overloaded days and missing focus blocks.
-3. **Explain** — the model receives only the computed results and writes two to four sentences. It cannot add, remove, or invent a slot.
+1. **Interpret the request** — OpenRouter returns intent, duration and date bounds; a regex parser takes over when the key is absent or the call fails. Event requests use a guided parser so missing duration or time becomes a short follow-up with choices.
+2. **Compute** — `lib/scheduling.ts` finds gaps against the user's work hours, lunch and buffer preferences, scores slots, and detects overlaps, back-to-back runs, overloaded days and missing focus blocks.
+3. **Explain and confirm** — the model receives computed results and writes a short explanation. Event drafts show the exact title, time and duration, and create only after the user confirms.
 
 All date math runs in the viewer's IANA timezone (`lib/timezone.ts`), not the server's.
 
@@ -141,21 +146,22 @@ lib/
   crypto.ts                    AES-256-GCM
   supabase/admin.ts            service-role Postgres client
 supabase/migrations/0001_calendar_connections.sql
+supabase/migrations/0002_ai_rate_limits.sql
 ```
 
 ## Writing back to Google
 
-A suggested window in the assistant has an **Add to Google Calendar** button. It posts the slot to `POST /api/calendar/events`, which validates the range (5 minutes to 12 hours), requires a same-origin request and a signed-in session, then inserts the event on the viewer's `primary` calendar with `sendUpdates=none`.
+A suggested window or confirmed event draft posts to `POST /api/calendar/events`, which validates the range (5 minutes to 12 hours), requires a same-origin request and a signed-in session, then inserts the event on the viewer's `primary` calendar. Google sends invitations only when the user included attendee email addresses and confirmed the draft.
 
-Deliberately narrow: the event has a title, the slot's start/end and the viewer's timezone. No attendees are sent, so Google invites nobody, and there is no edit or delete path. Creating requires the `calendar.events` grant — a connection made under the old read-only scope still reads fine, and the UI offers **Reconnect** to approve write access.
+Event drafts include a title, date, start/end, duration, separate agenda and notes fields, location and optional attendee email addresses. Agenda and notes are saved in the event description. When attendees are included, the confirmation step says who will be invited and Google sends them invitations after creation. Rescheduling changes only the start and end of the selected event. Both actions require an explicit user choice and the `calendar.events` grant.
 
-Demo mode never writes: the button only appears on the live calendar.
+Demo mode never writes. It supports previews; adding a focus block or moving an event is available only on a connected live calendar.
 
 ## Scope
 
-In: Google Calendar read + add, demo mode, day/week view, find time, meeting briefs, conflict review, settings.
+In: Google Calendar read + add, user-approved rescheduling, demo mode, day/week view, find time, meeting briefs, conflict review, personalized scheduling preferences, weekly planning, light/dark themes, settings.
 
-Out: editing/deleting events, inviting people, coworker availability, notifications, multiple calendars.
+Out: deleting events, discovering coworker availability, notifications for reschedules, multiple calendars.
 
 Calendar scopes can require Google verification for public use; while the consent screen is in Testing, only listed test users can sign in, and refresh tokens may expire after about seven days. Demo mode keeps the app reviewable either way.
 # cadence

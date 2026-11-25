@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Inter, Instrument_Serif } from "next/font/google";
 import "./globals.css";
+import { ThemeProvider } from "@/components/theme-provider";
 
 const inter = Inter({
   subsets: ["latin"],
@@ -18,13 +19,27 @@ const serif = Instrument_Serif({
 export const metadata: Metadata = {
   title: "Cadence — calendar intelligence",
   description:
-    "Read your week clearly. Find focus time, prepare for meetings, and surface conflicts without changing a single event.",
+    "Find focus time, prepare for meetings, and plan your week with Cadence. Review every calendar change before it happens.",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" className={`${inter.variable} ${serif.variable}`}>
-      <body className="font-sans antialiased">{children}</body>
+    <html
+      lang="en"
+      suppressHydrationWarning
+      className={`${inter.variable} ${serif.variable}`}
+    >
+      <head>
+        <script
+          dangerouslySetInnerHTML={{
+            __html:
+              'try{if(localStorage.getItem("cadence.theme.v1")==="dark"){document.documentElement.classList.add("dark")}}catch(e){}',
+          }}
+        />
+      </head>
+      <body className="font-sans antialiased">
+        <ThemeProvider>{children}</ThemeProvider>
+      </body>
     </html>
   );
 }

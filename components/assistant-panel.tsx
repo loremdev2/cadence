@@ -4,6 +4,8 @@ import { useEffect, useRef, useState } from "react";
 import {
   AlertTriangle,
   ArrowUp,
+  CalendarRange,
+  CalendarPlus,
   Check,
   ChevronRight,
   Clock,
@@ -13,7 +15,7 @@ import {
   ShieldCheck,
   Sparkles,
 } from "lucide-react";
-import type { AiConflict, AiSlot, AssistantResult, CalEvent } from "@/lib/types";
+import type { AiConflict, AiSlot, AssistantResult, CalEvent, EventDraft } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -34,14 +36,34 @@ interface AssistantPanelProps {
   canWrite: boolean;
   onAsk: (prompt: string) => void;
   onJump: (iso: string) => void;
-  onBookSlot: (slot: AiSlot, title: string) => Promise<string | null>;
+  onBookSlot: (
+    slot: AiSlot,
+    title: string,
+    details?: { description?: string; location?: string; attendees?: string[] },
+  ) => Promise<string | null>;
+  onResolveEvent: (
+    draft: EventDraft,
+    change: {
+      start?: string | null;
+      durationMinutes?: number | null;
+      title?: string;
+      agenda?: string;
+      description?: string;
+      location?: string;
+      attendees?: string[];
+    },
+  ) => Promise<AssistantResult>;
   onGoLive: () => void;
 }
 
 interface BookingContext {
   live: boolean;
   canWrite: boolean;
-  onBook: (slot: AiSlot, title: string) => Promise<string | null>;
+  onBook: (
+    slot: AiSlot,
+    title: string,
+    details?: { description?: string; location?: string; attendees?: string[] },
+  ) => Promise<string | null>;
   /** Leaves the demo calendar (or starts sign-in) so a window can be written. */
   onGoLive: () => void;
 }
@@ -166,7 +188,7 @@ function SlotCard({
         </div>
       ) : !booking.canWrite ? (
         <a
-          href="/auth/google/start?next=/"
+          href="/auth/google/start?next=/calendar"
           className="mt-2 flex items-start gap-1 rounded-lg bg-[#FDF4EF] px-2 py-1.5 text-[10.5px] leading-snug text-[#7C452C] underline decoration-[#E9D3C6] underline-offset-2 hover:text-clay"
         >
           <ShieldCheck className="mt-0.5 h-3 w-3 shrink-0" />
@@ -253,14 +275,284 @@ function ConflictCard({ conflict }: { conflict: AiConflict }) {
   );
 }
 
+function parseAttendees(value: string) {
+  return [...new Set(value.split(/[,;\n]+/).map((email) => email.trim().toLowerCase()).filter(Boolean))];
+}
+
+function EventDraftCard({
+  initial,
+  onResolve,
+  onCreate,
+  booking,
+}: {
+  initial: EventDraft;
+  onResolve: AssistantPanelProps["onResolveEvent"];
+  onCreate: (
+    slot: AiSlot,
+    title: string,
+    details?: { description?: string; location?: string; attendees?: string[] },
+  ) => Promise<string | null>;
+  booking: BookingContext;
+}) {
+  const [draft, setDraft] = useState(initial);
+  const [title, setTitle] = useState(initial.title);
+  const [agenda, setAgenda] = useState(initial.agenda);
+  const [description, setDescription] = useState(initial.description);
+  const [location, setLocation] = useState(initial.location);
+  const [attendeeText, setAttendeeText] = useState(initial.attendees.join(", "));
+  const [customMinutes, setCustomMinutes] = useState(
+    initial.durationMinutes ? String(initial.durationMinutes) : "",
+  );
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [created, setCreated] = useState<string | null>(null);
+
+  const resolve = async (change: Parameters<typeof onResolve>[1]) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await onResolve(draft, {
+        ...change,
+        title,
+        agenda,
+        description,
+        location,
+        attendees: parseAttendees(attendeeText),
+      });
+      if (!result.eventDraft) throw new Error(result.answer);
+      setDraft(result.eventDraft);
+      setAgenda(result.eventDraft.agenda);
+      setDescription(result.eventDraft.description);
+      setLocation(result.eventDraft.location);
+      setAttendeeText(result.eventDraft.attendees.join(", "));
+      setCustomMinutes(result.eventDraft.durationMinutes ? String(result.eventDraft.durationMinutes) : "");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not update the event details.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const applyCustomDuration = () => {
+    const minutes = Number(customMinutes);
+    if (!Number.isInteger(minutes) || minutes < 5 || minutes > 720) {
+      setError("Enter a whole number from 5 to 720 minutes.");
+      return;
+    }
+    void resolve({ durationMinutes: minutes });
+  };
+
+  const confirm = async () => {
+    const slot = draft.options[0];
+    if (!slot || !title.trim() || busy) return;
+    const attendees = parseAttendees(attendeeText);
+    if (attendees.length > 100) {
+      setError("Add no more than 100 attendees to one event.");
+      return;
+    }
+    if (attendees.some((email) => !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))) {
+      setError("Enter attendee email addresses separated by commas.");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      const eventDescription = [
+        agenda.trim() ? `Agenda:\n${agenda.trim()}` : "",
+        description.trim(),
+      ].filter(Boolean).join("\n\n");
+      setCreated((await onCreate(slot, title.trim(), {
+        description: eventDescription,
+        location,
+        attendees,
+      })) ?? "");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not create the event.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (created !== null) {
+    return (
+      <p className="mt-2 rounded-lg bg-[#F1F7F2] px-2.5 py-2 text-[11px] text-[#2F6449]">
+        <Check className="mr-1 inline h-3 w-3" />
+        Event created. {created && <a className="underline" href={created} target="_blank" rel="noreferrer">Open in Google Calendar</a>}
+      </p>
+    );
+  }
+
+  return (
+    <div className="mt-2.5 space-y-2 rounded-xl border border-line bg-white p-2.5">
+      <label className="block text-[10px] text-muted">
+        Event title
+        <input
+          value={title}
+          onChange={(event) => setTitle(event.target.value)}
+          maxLength={200}
+          className="mt-1 w-full rounded-lg border border-line bg-[#FCFBF8] px-2 py-1.5 text-[11.5px] text-ink outline-none focus:border-spruce/40"
+        />
+      </label>
+
+      <label className="block text-[10px] text-muted">
+        Agenda (optional)
+        <textarea
+          value={agenda}
+          onChange={(event) => setAgenda(event.target.value)}
+          maxLength={5000}
+          rows={3}
+          placeholder="Topics, decisions, or discussion points"
+          className="mt-1 w-full resize-y rounded-lg border border-line bg-[#FCFBF8] px-2 py-1.5 text-[11px] text-ink outline-none focus:border-spruce/40"
+        />
+      </label>
+
+      <label className="block text-[10px] text-muted">
+        Description / notes (optional)
+        <textarea
+          value={description}
+          onChange={(event) => setDescription(event.target.value)}
+          maxLength={5000}
+          rows={2}
+          placeholder="Add any other context for attendees"
+          className="mt-1 w-full resize-y rounded-lg border border-line bg-[#FCFBF8] px-2 py-1.5 text-[11px] text-ink outline-none focus:border-spruce/40"
+        />
+      </label>
+
+      <label className="block text-[10px] text-muted">
+        Location (optional)
+        <input
+          value={location}
+          onChange={(event) => setLocation(event.target.value)}
+          maxLength={500}
+          placeholder="Room, address, or video link"
+          className="mt-1 w-full rounded-lg border border-line bg-[#FCFBF8] px-2 py-1.5 text-[11px] text-ink outline-none focus:border-spruce/40"
+        />
+      </label>
+
+      <label className="block text-[10px] text-muted">
+        Attendees (email addresses, optional)
+        <input
+          value={attendeeText}
+          onChange={(event) => setAttendeeText(event.target.value)}
+          maxLength={5000}
+          placeholder="name@example.com, teammate@example.com"
+          className="mt-1 w-full rounded-lg border border-line bg-[#FCFBF8] px-2 py-1.5 text-[11px] text-ink outline-none focus:border-spruce/40"
+        />
+      </label>
+
+      {draft.status === "needs_duration" && (
+        <div>
+          <p className="text-[10.5px] text-ink-soft">Choose a duration</p>
+          <div className="mt-1.5 grid grid-cols-3 gap-1.5">
+            {[30, 45, 60].map((minutes) => (
+              <Button key={minutes} size="xs" variant="secondary" disabled={busy} onClick={() => void resolve({ durationMinutes: minutes })}>
+                {minutes} min
+              </Button>
+            ))}
+          </div>
+          <div className="mt-2 flex items-center gap-1.5">
+            <input
+              type="number"
+              min={5}
+              max={720}
+              step={1}
+              value={customMinutes}
+              onChange={(event) => setCustomMinutes(event.target.value)}
+              aria-label="Custom duration in minutes"
+              placeholder="Custom minutes"
+              className="min-w-0 flex-1 rounded-lg border border-line bg-[#FCFBF8] px-2 py-1.5 text-[11px] text-ink outline-none focus:border-spruce/40"
+            />
+            <Button size="xs" variant="secondary" disabled={busy} onClick={applyCustomDuration}>
+              Use duration
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {draft.status !== "needs_duration" && (
+        <div className="flex items-center gap-1.5">
+          <input
+            type="number"
+            min={5}
+            max={720}
+            step={1}
+            value={customMinutes}
+            onChange={(event) => setCustomMinutes(event.target.value)}
+            aria-label="Change duration in minutes"
+            className="min-w-0 flex-1 rounded-lg border border-line bg-[#FCFBF8] px-2 py-1.5 text-[11px] text-ink outline-none focus:border-spruce/40"
+          />
+          <span className="text-[10px] text-muted">min</span>
+          <Button size="xs" variant="secondary" disabled={busy} onClick={applyCustomDuration}>
+            Update
+          </Button>
+        </div>
+      )}
+
+      {draft.status === "choose_time" && (
+        <div>
+          <p className="text-[10.5px] text-ink-soft">{draft.note ?? "Choose a time"}</p>
+          <div className="mt-1.5 space-y-1.5">
+            {draft.options.map((option) => (
+              <Button
+                key={option.start}
+                size="xs"
+                variant="secondary"
+                disabled={busy}
+                className="w-full justify-between"
+                onClick={() => void resolve({ start: option.start })}
+              >
+                <span>{option.dayLabel}</span><span>{option.timeLabel}</span>
+              </Button>
+            ))}
+            {draft.options.length === 0 && <p className="text-[10px] text-muted">No open times found in this calendar range. Try another date or duration.</p>}
+          </div>
+        </div>
+      )}
+
+      {draft.status === "confirm" && draft.options[0] && (
+        <div className="rounded-lg bg-[#F1EFE7] px-2.5 py-2 text-[11px] text-ink-soft">
+          <p className="font-medium text-ink">{draft.options[0].dayLabel} · {draft.options[0].timeLabel}</p>
+          <p>{draft.durationMinutes} minutes · Google Calendar event</p>
+          {location.trim() && <p className="mt-1">Location: {location.trim()}</p>}
+          {agenda.trim() && <p className="mt-1 line-clamp-3 whitespace-pre-wrap">Agenda: {agenda.trim()}</p>}
+          {description.trim() && <p className="mt-1 line-clamp-3 whitespace-pre-wrap">{description.trim()}</p>}
+          {parseAttendees(attendeeText).length > 0 && (
+            <p className="mt-1 text-[10px] text-muted">
+              Google will invite: {parseAttendees(attendeeText).join(", ")}
+            </p>
+          )}
+          {!booking.live ? (
+            <Button size="sm" variant="secondary" className="mt-2 w-full" onClick={booking.onGoLive}>
+              Connect a calendar to create this event
+            </Button>
+          ) : !booking.canWrite ? (
+            <a href="/auth/google/start?next=/calendar" className="mt-2 block text-[10.5px] text-clay underline">
+              Reconnect Google Calendar to approve event creation
+            </a>
+          ) : (
+            <Button size="sm" className="mt-2 w-full" disabled={busy || !title.trim()} onClick={() => void confirm()}>
+              {busy ? "Creating…" : "Confirm & create event"}
+            </Button>
+          )}
+        </div>
+      )}
+
+      {busy && draft.status !== "confirm" && <p className="text-[10px] text-muted">Checking your calendar…</p>}
+      {error && <p className="text-[10.5px] text-clay">{error}</p>}
+    </div>
+  );
+}
+
 function AssistantMessage({
   message,
   onJump,
   booking,
+  onResolveEvent,
 }: {
   message: ChatMessage;
   onJump: (iso: string) => void;
   booking: BookingContext;
+  onResolveEvent: AssistantPanelProps["onResolveEvent"];
 }) {
   if (message.error) {
     return (
@@ -324,6 +616,15 @@ function AssistantMessage({
           The brief is ready in the Meeting tab.
         </p>
       )}
+
+      {result.eventDraft && (
+        <EventDraftCard
+          initial={result.eventDraft}
+          onResolve={onResolveEvent}
+          onCreate={booking.onBook}
+          booking={booking}
+        />
+      )}
     </div>
   );
 }
@@ -337,6 +638,7 @@ export function AssistantPanel({
   onAsk,
   onJump,
   onBookSlot,
+  onResolveEvent,
   onGoLive,
 }: AssistantPanelProps) {
   const [input, setInput] = useState("");
@@ -367,6 +669,16 @@ export function AssistantPanel({
       prompt: "Find me a 45-minute focus block this week",
     },
     {
+      icon: CalendarRange,
+      label: "Plan my week",
+      prompt: "Plan my week and tell me what to protect",
+    },
+    {
+      icon: CalendarPlus,
+      label: "Schedule an event",
+      prompt: "Schedule a meeting on Thursday at 5pm",
+    },
+    {
       icon: FileText,
       label: selectedEvent
         ? `Prep me for “${selectedEvent.title}”`
@@ -395,8 +707,8 @@ export function AssistantPanel({
               What should we look at?
             </h2>
             <p className="mt-1.5 text-[12px] leading-relaxed text-muted">
-              I read the range you are viewing and suggest changes you can review.
-              Nothing changes until you add a window yourself.
+              I can find time, plan your week, prepare for a meeting, or draft an
+              event from a request. Nothing changes until you confirm it.
             </p>
 
             <div className="mt-4 space-y-1.5">
@@ -416,7 +728,26 @@ export function AssistantPanel({
               ))}
             </div>
 
-            <div className="mt-4 flex items-start gap-2 rounded-xl border border-dashed border-line p-3 text-[11px] leading-relaxed text-muted">
+            <button
+              type="button"
+              onClick={() =>
+                onAsk("Find 90 minutes for focus before Thursday, avoiding mornings")
+              }
+              className="mt-3 w-full rounded-xl border border-[#DCE5DC] bg-[#F4F7F2] px-3 py-2.5 text-left transition-colors hover:border-spruce/30"
+            >
+              <span className="flex items-center gap-1.5 text-[9px] uppercase tracking-[0.14em] text-spruce">
+                <Sparkles className="h-3 w-3" />
+                Sample request
+              </span>
+              <span className="mt-1 block text-[11.5px] leading-snug text-[#33443A]">
+                “Find 90 minutes for focus before Thursday, avoiding mornings”
+              </span>
+              <span className="mt-0.5 block text-[10px] text-muted">
+                Runs on the demo week — no calendar needed.
+              </span>
+            </button>
+
+            <div className="mt-3 flex items-start gap-2 rounded-xl border border-dashed border-line p-3 text-[11px] leading-relaxed text-muted">
               <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" />
               Try “Find 30 minutes on Thursday afternoon”, or select a meeting first and
               ask for a brief.
@@ -437,6 +768,7 @@ export function AssistantPanel({
                   message={message}
                   onJump={onJump}
                   booking={booking}
+                  onResolveEvent={onResolveEvent}
                 />
               ),
             )}
@@ -464,6 +796,7 @@ export function AssistantPanel({
       >
         <div className="rounded-xl border border-line bg-white p-1.5 shadow-sm transition-colors focus-within:border-spruce/40 focus-within:ring-2 focus-within:ring-spruce/10">
           <textarea
+            data-tour="assistant-input"
             rows={2}
             value={input}
             onChange={(event) => setInput(event.target.value)}
@@ -493,7 +826,7 @@ export function AssistantPanel({
         </div>
         <p className="mt-2 flex items-center gap-1 px-1 text-[9.5px] text-muted">
           <ShieldCheck className="h-3 w-3" />
-          Cadence writes only the window you add
+          Cadence writes only after you confirm an event or meeting move
         </p>
       </form>
     </div>

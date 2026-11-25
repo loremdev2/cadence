@@ -5,6 +5,7 @@ import {
   CalendarError,
   createGoogleEvent,
   listGoogleEvents,
+  moveGoogleEvent,
 } from "@/lib/google/calendar";
 import { isSameOriginRequest } from "@/lib/same-origin";
 import { getSession } from "@/lib/session";
@@ -26,7 +27,17 @@ const createBodySchema = z.object({
   start: z.string().min(1).max(60),
   end: z.string().min(1).max(60),
   timeZone: z.string().max(80).optional(),
-  description: z.string().max(2000).nullish(),
+  description: z.string().max(11000).nullish(),
+  location: z.string().max(500).nullish(),
+  attendees: z.array(z.string().email().max(320)).max(100).nullish(),
+});
+
+const moveBodySchema = z.object({
+  mode: z.enum(["demo", "live"]),
+  eventId: z.string().min(1).max(400),
+  start: z.string().min(1).max(60),
+  end: z.string().min(1).max(60),
+  timeZone: z.string().max(80).optional(),
 });
 
 export async function GET(request: NextRequest) {
@@ -156,7 +167,7 @@ export async function POST(request: NextRequest) {
   if (!parsed.success) {
     return NextResponse.json(
       {
-        error: "That event could not be read. A title, start and end are required.",
+        error: "That event could not be read. Check its title, time, description, location, and attendee email addresses.",
         code: "bad_request",
         issues: parsed.error.issues.slice(0, 5).map((issue) => issue.message),
       },
@@ -200,6 +211,8 @@ export async function POST(request: NextRequest) {
       end: end.toISOString(),
       timeZone: safeTimeZone(data.timeZone ?? request.nextUrl.searchParams.get("tz")),
       description: data.description ?? null,
+      location: data.location ?? null,
+      attendees: [...new Set((data.attendees ?? []).map((email) => email.trim().toLowerCase()))],
     });
     return NextResponse.json(
       { event: created.event, htmlLink: created.htmlLink },
@@ -215,6 +228,107 @@ export async function POST(request: NextRequest) {
     console.error("calendar write failed", cause);
     return NextResponse.json(
       { error: "The event could not be added.", code: "api_error" },
+      { status: 500, headers: NO_STORE },
+    );
+  }
+}
+
+/** Moves one existing event to an approved time. Only start and end change. */
+export async function PATCH(request: NextRequest) {
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json(
+      { error: "Cross-origin request refused", code: "forbidden" },
+      { status: 403, headers: NO_STORE },
+    );
+  }
+
+  const session = await getSession();
+  if (!session) {
+    return NextResponse.json(
+      { error: "Sign in to move an event on your calendar.", code: "unauthenticated" },
+      { status: 401, headers: NO_STORE },
+    );
+  }
+
+  if (!storageConfigured()) {
+    return NextResponse.json(
+      { error: "Storage is not configured, so the calendar cannot be changed.", code: "not_configured" },
+      { status: 503, headers: NO_STORE },
+    );
+  }
+
+  let body: unknown;
+  try {
+    body = await request.json();
+  } catch {
+    return NextResponse.json(
+      { error: "Invalid JSON body", code: "bad_request" },
+      { status: 400, headers: NO_STORE },
+    );
+  }
+
+  const parsed = moveBodySchema.safeParse(body);
+  if (!parsed.success) {
+    return NextResponse.json(
+      {
+        error: "That move could not be read. An event, start and end are required.",
+        code: "bad_request",
+        issues: parsed.error.issues.slice(0, 5).map((issue) => issue.message),
+      },
+      { status: 400, headers: NO_STORE },
+    );
+  }
+
+  const data = parsed.data;
+  if (data.mode === "demo") {
+    return NextResponse.json(
+      {
+        error: "This is the demo calendar. Switch to your live calendar to move events.",
+        code: "demo_mode",
+      },
+      { status: 400, headers: NO_STORE },
+    );
+  }
+
+  const start = new Date(data.start);
+  const end = new Date(data.end);
+  const minutes = (end.getTime() - start.getTime()) / 60_000;
+  if (
+    !Number.isFinite(start.getTime()) ||
+    !Number.isFinite(end.getTime()) ||
+    minutes < MIN_EVENT_MINUTES ||
+    minutes > MAX_EVENT_HOURS * 60
+  ) {
+    return NextResponse.json(
+      {
+        error: `An event needs a valid start and an end between ${MIN_EVENT_MINUTES} minutes and ${MAX_EVENT_HOURS} hours later.`,
+        code: "bad_request",
+      },
+      { status: 400, headers: NO_STORE },
+    );
+  }
+
+  try {
+    const moved = await moveGoogleEvent(session.userId, {
+      eventId: data.eventId,
+      start: start.toISOString(),
+      end: end.toISOString(),
+      timeZone: safeTimeZone(data.timeZone ?? request.nextUrl.searchParams.get("tz")),
+    });
+    return NextResponse.json(
+      { event: moved.event, htmlLink: moved.htmlLink },
+      { headers: NO_STORE },
+    );
+  } catch (cause) {
+    if (cause instanceof CalendarError) {
+      return NextResponse.json(
+        { error: cause.message, code: cause.code },
+        { status: cause.status, headers: NO_STORE },
+      );
+    }
+    console.error("calendar move failed", cause);
+    return NextResponse.json(
+      { error: "The event could not be moved.", code: "api_error" },
       { status: 500, headers: NO_STORE },
     );
   }

@@ -20,13 +20,23 @@ import {
   zonedParts,
   zonedToUtc,
 } from "../timezone";
+import { normalizePreferences } from "../preferences";
 import type {
+  AiConflict,
+  AssistantIntent,
   AssistantResult,
+  BriefItem,
   BriefSection,
+  BriefSource,
   CalEvent,
   CalendarMode,
   CalendarRange,
+  EventDraft,
+  RescheduleOption,
+  SchedulingPreferences,
 } from "../types";
+
+export type { AssistantIntent };
 
 // Sole switch for the model: set OPENROUTER_MODEL and both the interpretation
 // call and the narration call use that id. Tolerates quotes and stray spaces,
@@ -73,8 +83,6 @@ export function aiConfigured() {
   return Boolean(process.env.OPENROUTER_API_KEY);
 }
 
-export type AssistantIntent = "find_time" | "brief" | "conflicts" | "overview";
-
 export interface AssistantInput {
   prompt: string;
   events: CalEvent[];
@@ -83,6 +91,18 @@ export interface AssistantInput {
   mode: CalendarMode;
   eventId?: string | null;
   forceIntent?: AssistantIntent | null;
+  preferences?: SchedulingPreferences | null;
+  eventDraft?: {
+    title: string;
+    agenda?: string;
+    description?: string;
+    location?: string;
+    attendees?: string[];
+    requestedDate?: string | null;
+    requestedPeriod?: "morning" | "afternoon" | "evening" | null;
+    start?: string | null;
+    durationMinutes?: number | null;
+  } | null;
   now?: Date;
 }
 
@@ -94,7 +114,12 @@ interface Interpretation {
   searchEndInclusive: boolean;
   avoidLunch: boolean;
   preferMornings: boolean;
+  avoidMornings: boolean;
   eventId: string | null;
+  eventTitle: string | null;
+  requestedDate: string | null;
+  requestedPeriod: "morning" | "afternoon" | "evening" | null;
+  requestedStart: string | null;
 }
 
 let provider: ReturnType<typeof createOpenRouter> | null = null;
@@ -141,13 +166,41 @@ function parseCivil(value: string | null) {
 }
 
 function weekdayIndexFromPrompt(prompt: string, prefixPattern: string) {
+  const weekdayPattern =
+    "sunday|monday|tues(?:day)?|wed(?:nesday)?|thursday|thursay|thurday|thrusday|thur|thu|friday|saturday";
   const pattern = new RegExp(
-    `\\b(?:${prefixPattern})\\s+(?:next\\s+)?(${WEEKDAY_WORDS.join("|")})\\b`,
+    `\\b(?:${prefixPattern})\\s+(?:next\\s+)?(${weekdayPattern})\\b`,
     "i",
   );
   const match = pattern.exec(prompt);
   if (!match) return null;
-  return WEEKDAY_WORDS.indexOf(match[1].toLowerCase() as (typeof WEEKDAY_WORDS)[number]);
+  const day = match[1].toLowerCase();
+  if (day.startsWith("tues")) return 2;
+  if (day.startsWith("wed")) return 3;
+  if (day.startsWith("thu")) return 4;
+  return WEEKDAY_WORDS.indexOf(day as (typeof WEEKDAY_WORDS)[number]);
+}
+
+function requestedClock(prompt: string) {
+  const twelveHour = /\b(?:at\s+)?(1[0-2]|0?[1-9])(?::([0-5]\d))?\s*(a\.?m\.?|p\.?m\.?)\b/i.exec(prompt);
+  if (twelveHour) {
+    let hour = Number(twelveHour[1]) % 12;
+    if (twelveHour[3].toLowerCase().startsWith("p")) hour += 12;
+    return { hour, minute: Number(twelveHour[2] ?? 0) };
+  }
+  const twentyFourHour = /\b(?:at\s+)?([01]?\d|2[0-3]):([0-5]\d)\b/.exec(prompt);
+  return twentyFourHour
+    ? { hour: Number(twentyFourHour[1]), minute: Number(twentyFourHour[2]) }
+    : null;
+}
+
+function requestedEventTitle(prompt: string) {
+  const match = /\b(?:schedule|book|create|add|set\s+up)\s+(?:(?:a|an|the)\s+)?(.+?)(?=\s+(?:on|at|for|today|tomorrow|monday|tuesday|wednesday|thursday|thursay|friday|saturday|sunday|next\s+(?:monday|tuesday|wednesday|thursday|thursay|friday|saturday|sunday))\b|$)/i.exec(
+    prompt,
+  );
+  const title = match?.[1]?.trim().replace(/[.,!?]+$/, "");
+  if (!title || /^(?:it|this|that|something)$/i.test(title)) return "Meeting";
+  return title.charAt(0).toUpperCase() + title.slice(1);
 }
 
 function nextCivilForWeekday(
@@ -167,7 +220,9 @@ function heuristicInterpret(input: AssistantInput, now: Date): Interpretation {
 
   let intent: AssistantIntent = input.forceIntent ?? "overview";
   if (!input.forceIntent) {
-    if (
+    if (/\b(schedule|book|create|add|set up)\b/i.test(prompt) && /\b(meeting|call|event|appointment|interview|session)\b/i.test(prompt)) {
+      intent = "create_event";
+    } else if (
       /(conflict|overlap|double[- ]?book|back[- ]to[- ]back|schedule health|too many meetings|clash)/.test(
         prompt,
       )
@@ -186,6 +241,15 @@ function heuristicInterpret(input: AssistantInput, now: Date): Interpretation {
     ) {
       intent = "brief";
     } else if (
+      /(plan (?:my|the|this) week|weekly plan|week plan|map (?:my|the) week)/.test(prompt)
+    ) {
+      intent = "week_plan";
+    } else if (
+      input.eventId &&
+      /(what if|reschedul|move|shift|another time|alternative)/.test(prompt)
+    ) {
+      intent = "reschedule";
+    } else if (
       /(find|free|open|gap|slot|block|time for|when am i|availability|fit)/.test(prompt)
     ) {
       intent = "find_time";
@@ -195,13 +259,16 @@ function heuristicInterpret(input: AssistantInput, now: Date): Interpretation {
   }
 
   let durationMinutes: number | null = null;
+  const durationPrompt = prompt.replace(/\bmi+nutes?\b/g, "minutes").replace(/\bminuites?\b/g, "minutes");
   const minutesMatch =
-    prompt.match(/(\d+(?:\.\d+)?)\s*(?:-|\s)?(?:minutes?|mins?|m)\b/) ??
-    prompt.match(/(\d+)\s*-\s*minute/);
-  const hoursMatch = prompt.match(/(\d+(?:\.\d+)?)\s*(?:hours?|hrs?|h)\b/);
+    durationPrompt.match(/(\d+(?:\.\d+)?)\s*(?:-|\s)?(?:minutes?|mins?|m)\b/) ??
+    durationPrompt.match(/(\d+)\s*-\s*minute/);
+  const hoursMatch = durationPrompt.match(/(\d+(?:\.\d+)?)\s*(?:hours?|hrs?|h)\b/);
   if (hoursMatch) durationMinutes = Math.round(Number(hoursMatch[1]) * 60);
   else if (minutesMatch) durationMinutes = Math.round(Number(minutesMatch[1]));
-  if (durationMinutes !== null) durationMinutes = clamp(durationMinutes, 15, 240);
+  if (durationMinutes !== null) {
+    durationMinutes = clamp(durationMinutes, intent === "create_event" ? 5 : 15, intent === "create_event" ? 720 : 240);
+  }
 
   const todayParts = zonedParts(now, tz);
   const todayCivil = civilFromParts(todayParts);
@@ -235,6 +302,32 @@ function heuristicInterpret(input: AssistantInput, now: Date): Interpretation {
     searchEndInclusive = true;
   }
 
+  let requestedStart: string | null = null;
+  const clock = requestedClock(prompt);
+  const eventDayIndex = weekdayIndexFromPrompt(prompt, "on|this|next");
+  const absoluteDay = /\b(\d{4}-\d{2}-\d{2})\b/.exec(prompt)?.[1] ?? null;
+  let eventCivil = absoluteDay ? parseCivil(absoluteDay) : null;
+  if (!eventCivil && /\btomorrow\b/.test(prompt)) eventCivil = addCivilDays(todayCivil, 1);
+  else if (!eventCivil && /\btoday\b/.test(prompt)) eventCivil = todayCivil;
+  else if (!eventCivil && eventDayIndex !== null) {
+    eventCivil = nextCivilForWeekday(eventDayIndex, todayCivil, todayDow, true);
+  }
+  if (eventCivil && clock) {
+    let date = zonedToUtc(eventCivil, tz, clock.hour, clock.minute);
+    if (date.getTime() <= now.getTime() && eventDayIndex !== null) {
+      eventCivil = addCivilDays(eventCivil, 7);
+      date = zonedToUtc(eventCivil, tz, clock.hour, clock.minute);
+    }
+    requestedStart = date.toISOString();
+  }
+
+  // "Avoiding mornings" must win over the word "focus"/"morning" appearing in
+  // the same sentence, so the negative form is checked first.
+  const avoidMornings =
+    /(?:avoid|skip|no|not|without|cant|cannot|don't want)\s+(?:the\s+)?mornings?\b/.test(
+      prompt,
+    ) || /(?:afternoons? only|only afternoons?|later in the day)/.test(prompt);
+
   return {
     intent,
     durationMinutes,
@@ -242,13 +335,33 @@ function heuristicInterpret(input: AssistantInput, now: Date): Interpretation {
     searchEnd,
     searchEndInclusive,
     avoidLunch: !/(lunch|whenever|any time|no preference)/.test(prompt),
-    preferMornings: /(morning|early|before lunch|focus)/.test(prompt),
+    preferMornings:
+      !avoidMornings && /(morning|early|before lunch|focus)/.test(prompt),
+    avoidMornings,
     eventId: input.eventId ?? null,
+    eventTitle: input.eventDraft?.title ?? (intent === "create_event" ? requestedEventTitle(prompt) : null),
+    requestedDate: input.eventDraft?.requestedDate ?? (eventCivil ? isoDate(eventCivil) : null),
+    requestedStart: input.eventDraft?.start ?? requestedStart,
+    requestedPeriod:
+      (input.eventDraft?.requestedPeriod ??
+        (/\b(afternoon|evening|morning)\b/.exec(prompt)?.[1] as
+        | "morning"
+        | "afternoon"
+        | "evening"
+        | undefined)) ?? null,
   };
 }
 
 const interpretationSchema = z.object({
-  intent: z.enum(["find_time", "brief", "conflicts", "overview"]),
+  intent: z.enum([
+    "find_time",
+    "brief",
+    "conflicts",
+    "overview",
+    "week_plan",
+    "reschedule",
+    "create_event",
+  ]),
   durationMinutes: z
     .number()
     .nullable()
@@ -263,6 +376,9 @@ const interpretationSchema = z.object({
     .describe("Last day to search as yyyy-mm-dd, or null."),
   avoidLunch: z.boolean().describe("True unless the user says lunch does not matter."),
   preferMornings: z.boolean().describe("True when mornings are preferred or focus work is mentioned."),
+  avoidMornings: z
+    .boolean()
+    .describe("True when the user explicitly wants to avoid mornings."),
   eventId: z
     .string()
     .nullable()
@@ -275,6 +391,7 @@ async function interpret(
   now: Date,
 ): Promise<Interpretation> {
   const fallback = heuristicInterpret(input, now);
+  if (fallback.intent === "create_event" || input.eventDraft) return fallback;
   if (input.forceIntent) return fallback;
   const model = getModel();
   if (!model) return fallback;
@@ -296,8 +413,9 @@ async function interpret(
       abortSignal: AbortSignal.timeout(12_000),
       system:
         "You convert a busy professional's calendar request into a structured search. Never invent events. Resolve relative days using today's date and weekday. Use 24-hour local time. Only pick an eventId when the user clearly refers to one listed event. " +
-        "Pick exactly one intent: find_time (the user wants a free slot), brief (background on one meeting), conflicts (the user asks about overlaps, double bookings or clashes), overview (anything else). " +
-        "Any question about conflicts, clashes, double bookings or back-to-back meetings is intent conflicts, never find_time.",
+        "Pick exactly one intent: find_time (the user wants a free slot), brief (background on one meeting), conflicts (the user asks about overlaps, double bookings or clashes), week_plan (the user asks for a plan for the week), reschedule (the user asks to move or find another time for a specific listed event), overview (anything else). " +
+        "Any question about conflicts, clashes, double bookings or back-to-back meetings is intent conflicts, never find_time. " +
+        "If the user says to avoid mornings, set avoidMornings true and preferMornings false.",
       prompt: [
         `Today is ${weekdayLong(now, timeZone)}, ${fullDayLabel(now, timeZone)} in ${timeZone}.`,
         `Visible range: ${fullDayLabel(new Date(input.range.start), timeZone)} to ${fullDayLabel(new Date(input.range.end), timeZone)}.`,
@@ -319,8 +437,13 @@ async function interpret(
       searchEnd: parseCivil(object.searchEnd) ? object.searchEnd : fallback.searchEnd,
       searchEndInclusive: fallback.searchEndInclusive,
       avoidLunch: object.avoidLunch,
-      preferMornings: object.preferMornings,
+      preferMornings: object.avoidMornings ? false : object.preferMornings,
+      avoidMornings: object.avoidMornings,
       eventId: object.eventId ?? fallback.eventId,
+      eventTitle: fallback.eventTitle,
+      requestedDate: fallback.requestedDate,
+      requestedPeriod: fallback.requestedPeriod,
+      requestedStart: fallback.requestedStart,
     };
   } catch {
     return fallback;
@@ -410,14 +533,25 @@ async function buildFindTime(
 ): Promise<AssistantResult> {
   const duration = interpretation.durationMinutes ?? 45;
   const range = buildSearchRange(interpretation, input, timeZone);
-  const slots = findOpenSlots(input.events, {
+  const preferences = normalizePreferences(input.preferences);
+  const candidates = findOpenSlots(input.events, {
     range,
     durationMinutes: duration,
     timeZone,
-    avoidLunch: interpretation.avoidLunch,
-    preferMornings: interpretation.preferMornings,
-    limit: 4,
+    avoidLunch: interpretation.avoidLunch && preferences.protectLunch,
+    preferMornings:
+      !interpretation.avoidMornings &&
+      (interpretation.preferMornings || preferences.preferMornings),
+    preferences,
+    limit: interpretation.avoidMornings ? 12 : 4,
   });
+  const slots = interpretation.avoidMornings
+    ? candidates
+        .filter(
+          (slot) => Number(timeLabel(new Date(slot.start), timeZone).slice(0, 2)) >= 12,
+        )
+        .slice(0, 4)
+    : candidates;
 
   const meetings = meetingCountIn(input.events, range);
   const rangeStartLabel = fullDayLabel(new Date(range.start), timeZone);
@@ -451,7 +585,7 @@ async function buildFindTime(
     [
       `Today: ${weekdayLong(new Date(), timeZone)} ${fullDayLabel(new Date(), timeZone)}, ${timeZone}.`,
       `Request: "${input.prompt}"`,
-      `Constraints: ${durationLabel(duration)} block, 09:00–18:00, lunch ${interpretation.avoidLunch ? "protected" : "not protected"}, ${meetings} existing meetings in the window.`,
+      `Constraints: ${durationLabel(duration)} block, ${String(preferences.workdayStart).padStart(2, "0")}:00–${String(preferences.workdayEnd).padStart(2, "0")}:00, lunch ${interpretation.avoidLunch && preferences.protectLunch ? "protected" : "not protected"}, mornings ${interpretation.avoidMornings ? "excluded" : interpretation.preferMornings ? "preferred" : "neutral"}, ${meetings} existing meetings in the window.`,
       `Computed slots (this is the complete list):\n${facts}`,
       "Say which slot to take and why, in at most three sentences. Do not mention scores or invent other times.",
     ].join("\n"),
@@ -465,6 +599,7 @@ async function buildFindTime(
     slots,
     conflicts: [],
     brief: null,
+    reschedule: null,
     usedModel: Boolean(narration),
     model: narration ? AI_MODEL : null,
   };
@@ -478,16 +613,34 @@ function splitSentences(text: string) {
     .filter(Boolean);
 }
 
+function item(text: string, source: BriefSource): BriefItem {
+  return { text, source };
+}
+
+/** The invite's stated purpose: the first sentences of its description. */
+function invitePurpose(description: string): string | null {
+  const sentences = splitSentences(description);
+  if (sentences.length === 0) return null;
+  return sentences.slice(0, 2).join(" ").slice(0, 320);
+}
+
+/** Bulleted or numbered agenda lines on the invite, if it has any. */
+function inviteAgenda(description: string): string[] {
+  return description
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => /^([-*•]|\d+[.)])\s+/.test(line))
+    .map((line) => line.replace(/^([-*•]|\d+[.)])\s+/, "").slice(0, 180))
+    .filter(Boolean)
+    .slice(0, 5);
+}
+
 function fallbackBrief(event: CalEvent, timeZone: string): BriefSection[] {
   const description = event.description?.trim() ?? "";
   const text = `${event.title} ${description}`.toLowerCase();
   const others = (event.attendees ?? []).filter((attendee) => !attendee.self);
-
-  const context = description
-    ? splitSentences(description).slice(0, 3).map((sentence) => sentence.slice(0, 260))
-    : [
-        "No agenda or notes are attached to this invite. Open with a one-line framing of the decision you need, or the meeting will drift.",
-      ];
+  const purpose = invitePurpose(description);
+  const agenda = inviteAgenda(description);
 
   const prep: string[] = [];
   if (/(budget|spend|cost|pricing|renewal|contract|forecast)/.test(text)) {
@@ -537,22 +690,45 @@ function fallbackBrief(event: CalEvent, timeZone: string): BriefSection[] {
   const when = `${fullDayLabel(new Date(event.start), timeZone)}, ${timeLabel(new Date(event.start), timeZone)} – ${timeLabel(new Date(event.end), timeZone)}`;
 
   return [
-    { heading: "What this is", items: context },
+    {
+      heading: "Purpose",
+      items: purpose
+        ? [item(purpose, "invite")]
+        : [item("The invite has no description, so its purpose is not stated anywhere.", "invite")],
+    },
+    {
+      heading: "Agenda",
+      items:
+        agenda.length > 0
+          ? agenda.map((entry) => item(entry, "invite"))
+          : [item("The invite lists no agenda — propose one at the top of the meeting.", "inferred")],
+    },
     {
       heading: "Who is in the room",
       items:
         others.length > 0
           ? others
               .slice(0, 8)
-              .map(
-                (attendee) =>
+              .map((attendee) =>
+                item(
                   `${attendee.name ?? attendee.email ?? "Guest"}${attendee.responseStatus === "declined" ? " (declined)" : attendee.responseStatus === "tentative" ? " (tentative)" : ""}`,
+                  "attendees",
+                ),
               )
-          : ["Just you — protect the block and close the door."],
+          : [item("Just you — protect the block and close the door.", "calendar")],
     },
-    { heading: "Suggested prep", items: prep.slice(0, 4) },
-    { heading: "Questions to ask", items: questions.slice(0, 3) },
-    { heading: "Logistics", items: [`${when}${event.location ? ` · ${event.location}` : ""}`, event.recurring ? "Part of a recurring series." : "One-off meeting."] },
+    { heading: "Suggested prep", items: prep.slice(0, 4).map((entry) => item(entry, "inferred")) },
+    {
+      heading: "Questions to bring",
+      items: questions.slice(0, 3).map((entry) => item(entry, "inferred")),
+    },
+    {
+      heading: "Logistics",
+      items: [
+        item(`${when}${event.location ? ` · ${event.location}` : ""}`, "calendar"),
+        item(event.recurring ? "Part of a recurring series." : "One-off meeting.", "calendar"),
+      ],
+    },
   ];
 }
 
@@ -598,11 +774,13 @@ async function buildBrief(
       slots: [],
       conflicts: [],
       brief: null,
+      reschedule: null,
       usedModel: false,
       model: null,
     };
   }
 
+  const insufficient = !event.description?.trim();
   const fallbackSections = fallbackBrief(event, timeZone);
   const model = getModel();
   let sections = fallbackSections;
@@ -626,26 +804,34 @@ async function buildBrief(
           `When: ${fullDayLabel(new Date(event.start), timeZone)}, ${timeLabel(new Date(event.start), timeZone)} – ${timeLabel(new Date(event.end), timeZone)} (${timeZone})`,
           `Duration: ${Math.round((new Date(event.end).getTime() - new Date(event.start).getTime()) / 60_000)} minutes`,
           event.location ? `Location: ${event.location}` : "Location: not specified",
-          `Attendees: ${others.length ? others.map((attendee) => attendee.name ?? attendee.email).join(", ") : "none besides the owner"}`,
+          `Attendees: ${others.length ? others.map((attendee) => attendee.name ?? "Guest").join(", ") : "none besides the owner"}`,
           event.recurring ? "This is a recurring meeting." : "This is a one-off meeting.",
           `Description on the invite:\n${event.description?.slice(0, 1500) ?? "(none)"}`,
           "Return: context (2 sentences), talkingPoints (3), questions (3), prep (2).",
         ].join("\n"),
       });
       sections = [
-        { heading: "What this is", items: [object.context] },
+        { heading: "Purpose", items: [item(object.context, "inferred")] },
         {
           heading: "Who is in the room",
           items:
             others.length > 0
               ? others
                   .slice(0, 8)
-                  .map((attendee) => attendee.name ?? attendee.email ?? "Guest")
-              : ["Just you — protect the block and close the door."],
+                  .map((attendee) =>
+                    item(attendee.name ?? attendee.email ?? "Guest", "attendees"),
+                  )
+              : [item("Just you — protect the block and close the door.", "calendar")],
         },
-        { heading: "Talking points", items: object.talkingPoints },
-        { heading: "Questions to ask", items: object.questions },
-        { heading: "Suggested prep", items: object.prep },
+        {
+          heading: "Talking points",
+          items: object.talkingPoints.map((entry) => item(entry, "inferred")),
+        },
+        {
+          heading: "Questions to bring",
+          items: object.questions.map((entry) => item(entry, "inferred")),
+        },
+        { heading: "Suggested prep", items: object.prep.map((entry) => item(entry, "inferred")) },
       ];
       usedModel = true;
     } catch {
@@ -656,10 +842,13 @@ async function buildBrief(
   return {
     intent: "brief",
     headline: event.title,
-    answer: `A short brief for ${fullDayLabel(new Date(event.start), timeZone)} at ${timeLabel(new Date(event.start), timeZone)}. Prepared from the invite only — nothing outside this meeting was used.`,
+    answer: insufficient
+      ? `This invite has no description, so there is not enough information for a real summary. Below is general preparation for a ${Math.round((new Date(event.end).getTime() - new Date(event.start).getTime()) / 60_000)}-minute meeting on ${fullDayLabel(new Date(event.start), timeZone)}: add an agenda to the invite and regenerate for specifics.`
+      : `A short brief for ${fullDayLabel(new Date(event.start), timeZone)} at ${timeLabel(new Date(event.start), timeZone)}. Every line is marked with where it came from, and nothing outside this invite was used.`,
     slots: [],
     conflicts: [],
-    brief: { eventId: event.id, sections },
+    brief: { eventId: event.id, sections, insufficient },
+    reschedule: null,
     usedModel,
     model: usedModel ? AI_MODEL : null,
   };
@@ -681,6 +870,7 @@ async function buildConflicts(
       slots: [],
       conflicts: [],
       brief: null,
+      reschedule: null,
       usedModel: false,
       model: null,
     };
@@ -712,6 +902,7 @@ async function buildConflicts(
     slots: [],
     conflicts,
     brief: null,
+    reschedule: null,
     usedModel: Boolean(narration),
     model: narration ? AI_MODEL : null,
   };
@@ -764,6 +955,457 @@ async function buildOverview(
     slots: [],
     conflicts: conflicts.slice(0, 3),
     brief: null,
+    reschedule: null,
+    usedModel: Boolean(narration),
+    model: narration ? AI_MODEL : null,
+  };
+}
+
+async function buildWeekPlan(
+  input: AssistantInput,
+  timeZone: string,
+): Promise<AssistantResult> {
+  const preferences = normalizePreferences(input.preferences);
+  const scoped = input.events.filter((event) => inRange(event, input.range));
+  const stats = computeWeekStats(input.events, input.range, timeZone);
+  const conflicts = detectConflicts(scoped, timeZone).filter(
+    (conflict) => conflict.severity !== "low",
+  );
+  const overloaded = conflicts.filter(
+    (conflict) => conflict.type === "overloaded" || conflict.type === "no_focus",
+  );
+  const duration = preferences.focusBlockMinutes;
+  const slots = findOpenSlots(input.events, {
+    range: input.range,
+    durationMinutes: duration,
+    timeZone,
+    avoidLunch: preferences.protectLunch,
+    preferMornings: preferences.preferMornings,
+    preferences,
+    limit: 3,
+  });
+
+  const clock = (hour: number) => `${String(hour).padStart(2, "0")}:00`;
+  const workday = `${clock(preferences.workdayStart)}–${clock(preferences.workdayEnd)}`;
+
+  const headline = slots.length
+    ? `A ${durationAdjective(duration)} focus plan for this week`
+    : "No clean focus window this week";
+
+  const bestLine = slots.length
+    ? `The best opening is ${slots[0].dayLabel}, ${slots[0].timeLabel} — ${slots[0].reasons[0]}.`
+    : `I found no ${duration}-minute gap inside ${workday}.`;
+  const overloadLine = overloaded.length
+    ? ` ${overloaded.length === 1 ? "One day is" : `${overloaded.length} days are`} overloaded: ${overloaded
+        .slice(0, 3)
+        .map((conflict) => conflict.title)
+        .join("; ")}.`
+    : " No day is booked past four hours of meetings.";
+
+  const fallback = `${stats.meetingCount} meetings take ${stats.meetingHours} hours, with ${stats.focusHours} hours already protected for focus. ${bestLine}${overloadLine} Ranked with your preferences: ${workday}, ${preferences.protectLunch ? "lunch protected" : "lunch open"}, ${preferences.bufferMinutes}-minute buffer, ${preferences.preferMornings ? "mornings preferred" : "no morning bias"}.`;
+
+  const facts = [
+    `Meetings: ${stats.meetingCount} over ${stats.meetingHours}h; focus already booked: ${stats.focusHours}h; heaviest day: ${stats.busiestDay ?? "none"}.`,
+    slots.length
+      ? `Suggested focus windows:\n${slots
+          .map(
+            (slot, index) =>
+              `${index + 1}. ${slot.dayLabel} ${slot.timeLabel} (${slot.minutes}m, score ${slot.score}; ${slot.reasons.join("; ")})`,
+          )
+          .join("\n")}`
+      : "Suggested focus windows: none.",
+    overloaded.length
+      ? `Overloaded days: ${overloaded.map((conflict) => `${conflict.title} — ${conflict.detail}`).join(" | ")}`
+      : "Overloaded days: none.",
+    `Preferences: ${workday}, buffer ${preferences.bufferMinutes} minutes, lunch ${preferences.protectLunch ? "protected" : "open"}, mornings ${preferences.preferMornings ? "preferred" : "not preferred"}.`,
+  ].join("\n");
+
+  const narration = await narrate(
+    [
+      `Request: "${input.prompt}"`,
+      facts,
+      "Give a two or three sentence plan: name the focus window to protect and the day that needs relief. Only use these facts; do not invent times.",
+    ].join("\n"),
+    NARRATION_SYSTEM,
+  );
+
+  return {
+    intent: "week_plan",
+    headline,
+    answer: narration ?? fallback,
+    slots,
+    conflicts: conflicts.slice(0, 3),
+    brief: null,
+    reschedule: null,
+    usedModel: Boolean(narration),
+    model: narration ? AI_MODEL : null,
+  };
+}
+
+function eventSlot(start: Date, durationMinutes: number, timeZone: string): AiSlot {
+  const end = new Date(start.getTime() + durationMinutes * 60_000);
+  return {
+    start: start.toISOString(),
+    end: end.toISOString(),
+    minutes: durationMinutes,
+    dayLabel: dayLabel(start, timeZone),
+    timeLabel: `${timeLabel(start, timeZone)} – ${timeLabel(end, timeZone)}`,
+    score: 100,
+    reasons: ["the time you requested"],
+  };
+}
+
+function extractPromptField(prompt: string, labels: string[]) {
+  const labelPattern = labels.join("|");
+  const stopPattern = ["agenda", "description", "notes?", "location", "place", "attendees?"].join("|");
+  const match = new RegExp(`\\b(?:${labelPattern})\\s*:\\s*([\\s\\S]*?)(?=\\s+\\b(?:${stopPattern})\\s*:|$)`, "i").exec(prompt);
+  return match?.[1]?.trim().slice(0, 5000) ?? "";
+}
+
+function extractEventAgenda(prompt: string) {
+  return extractPromptField(prompt, ["agenda"]);
+}
+
+function extractEventDescription(prompt: string) {
+  return extractPromptField(prompt, ["description", "notes?"]);
+}
+
+function extractEventLocation(prompt: string) {
+  const match = /\b(?:location|place)\s*:\s*([\s\S]*?)(?=\s+\b(?:agenda|description|notes?|attendees?)\s*:|$)/i.exec(prompt);
+  return match?.[1]?.trim().slice(0, 500) ?? "";
+}
+
+function extractAttendeeEmails(prompt: string) {
+  const emails = prompt.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) ?? [];
+  return [...new Set(emails.map((email) => email.toLowerCase()))].slice(0, 100);
+}
+
+async function buildCreateEvent(
+  input: AssistantInput,
+  interpretation: Interpretation,
+  timeZone: string,
+): Promise<AssistantResult> {
+  const title = (input.eventDraft?.title ?? interpretation.eventTitle ?? "Meeting").trim().slice(0, 200);
+  const agenda = input.eventDraft?.agenda ?? extractEventAgenda(input.prompt);
+  const description = input.eventDraft?.description ?? extractEventDescription(input.prompt);
+  const location = input.eventDraft?.location ?? extractEventLocation(input.prompt);
+  const attendees = input.eventDraft?.attendees ?? extractAttendeeEmails(input.prompt);
+  const duration = input.eventDraft?.durationMinutes ?? interpretation.durationMinutes;
+  const requestedDate = input.eventDraft?.requestedDate ?? interpretation.requestedDate;
+  const requestedPeriod = interpretation.requestedPeriod;
+  const requestedStart = input.eventDraft?.start ?? interpretation.requestedStart;
+
+  if (!duration) {
+    const eventDraft: EventDraft = {
+      title,
+      agenda,
+      description,
+      location,
+      attendees,
+      requestedDate,
+      requestedPeriod,
+      start: requestedStart,
+      durationMinutes: null,
+      status: "needs_duration",
+      options: [],
+      note: null,
+    };
+    return {
+      intent: "create_event",
+      headline: "How long should the meeting be?",
+      answer: `I understood “${title}”${requestedStart ? ` for ${fullDayLabel(new Date(requestedStart), timeZone)} at ${timeLabel(new Date(requestedStart), timeZone)}` : requestedDate ? ` for ${requestedDate}${requestedPeriod ? ` in the ${requestedPeriod}` : ""}` : ""}. Choose a duration, then I’ll check the calendar and show exactly what would be created.`,
+      slots: [],
+      conflicts: [],
+      brief: null,
+      reschedule: null,
+      eventDraft,
+      usedModel: false,
+      model: null,
+    };
+  }
+
+  const preferences = normalizePreferences(input.preferences);
+  const civilTarget = requestedDate
+    ? parseCivil(requestedDate)
+    : requestedStart
+      ? civilFromParts(zonedParts(new Date(requestedStart), timeZone))
+      : null;
+  const dateRange = (days: number) => {
+    if (!civilTarget) return input.range;
+    return {
+      start: zonedToUtc(civilTarget, timeZone).toISOString(),
+      end: zonedToUtc(addCivilDays(civilTarget, days), timeZone).toISOString(),
+    };
+  };
+  const preferredPeriod = (slot: AiSlot) => {
+    if (!requestedPeriod) return true;
+    const hour = zonedParts(new Date(slot.start), timeZone).hour;
+    if (requestedPeriod === "morning") return hour >= 6 && hour < 12;
+    if (requestedPeriod === "afternoon") return hour >= 12 && hour < 17;
+    return hour >= 17 && hour < 22;
+  };
+  const findOptions = (days: number) =>
+    findOpenSlots(input.events, {
+      range: dateRange(days),
+      durationMinutes: duration,
+      timeZone,
+      preferences,
+      avoidLunch: preferences.protectLunch,
+      preferMornings: preferences.preferMornings,
+      limit: 12,
+    }).filter(preferredPeriod);
+  const requestedDayOptions = civilTarget ? findOptions(1) : [];
+  const alternatives = (requestedDayOptions.length > 0
+    ? requestedDayOptions
+    : findOptions(civilTarget ? 7 : 1)
+  ).slice(0, 3);
+  const requestedDayLabel = civilTarget
+    ? fullDayLabel(zonedToUtc(civilTarget, timeZone), timeZone)
+    : null;
+
+  if (requestedStart) {
+    const start = new Date(requestedStart);
+    const requested = eventSlot(start, duration, timeZone);
+    const padding = preferences.bufferMinutes * 60_000;
+    const collision = input.events.some((event) => {
+      if (event.status === "cancelled") return false;
+      const busyStart = new Date(event.start).getTime();
+      const busyEnd = new Date(event.end).getTime();
+      return (
+        Number.isFinite(busyStart) &&
+        Number.isFinite(busyEnd) &&
+        start.getTime() < busyEnd + padding &&
+        new Date(requested.end).getTime() > busyStart - padding
+      );
+    });
+
+    if (!collision) {
+      const draft: EventDraft = {
+        title,
+        agenda,
+        description,
+        location,
+        attendees,
+        requestedDate,
+        requestedPeriod,
+        start: requested.start,
+        durationMinutes: duration,
+        status: "confirm",
+        options: [requested],
+        note: null,
+      };
+      return {
+        intent: "create_event",
+        headline: "Review before creating",
+        answer: `That time is open. Review the title and time below, then confirm to add it to your Google Calendar.`,
+        slots: [],
+        conflicts: [],
+        brief: null,
+        reschedule: null,
+        eventDraft: draft,
+        usedModel: false,
+        model: null,
+      };
+    }
+
+    const draft: EventDraft = {
+      title,
+      agenda,
+      description,
+      location,
+      attendees,
+      requestedDate,
+      requestedPeriod,
+      start: null,
+      durationMinutes: duration,
+      status: "choose_time",
+      options: alternatives,
+      note: `That time overlaps another event or your ${preferences.bufferMinutes}-minute buffer. Choose an open${requestedPeriod ? ` ${requestedPeriod}` : ""} alternative${requestedDate ? ` on or after ${requestedDate}` : ""}.`,
+    };
+    return {
+      intent: "create_event",
+      headline: "That time is busy",
+      answer: `I can’t place “${title}” at ${fullDayLabel(start, timeZone)} ${timeLabel(start, timeZone)} without overlapping your calendar. Choose one of the open alternatives below.`,
+      slots: [],
+      conflicts: [],
+      brief: null,
+      reschedule: null,
+      eventDraft: draft,
+      usedModel: false,
+      model: null,
+    };
+  }
+
+  const draft: EventDraft = {
+    title,
+    agenda,
+    description,
+    location,
+    attendees,
+    requestedDate,
+    requestedPeriod,
+    start: null,
+    durationMinutes: duration,
+    status: "choose_time",
+    options: alternatives,
+    note:
+      requestedDayLabel && requestedDayOptions.length === 0
+        ? `No open ${requestedPeriod ?? "time"} on ${requestedDayLabel}. Choose one of the next available options.`
+        : "Choose an open time to continue.",
+  };
+  return {
+    intent: "create_event",
+    headline: "Choose a time",
+    answer: `I understood this as a ${duration}-minute “${title}” meeting${requestedDayLabel ? ` on ${requestedDayLabel}` : requestedDate ? ` on ${requestedDate}` : ""}${requestedPeriod ? ` in the ${requestedPeriod}` : ""}. ${requestedDayLabel && requestedDayOptions.length === 0 ? `There is no open ${requestedPeriod ?? "time"} that day, so I found the next available options. ` : ""}Choose an open option below, then review it before creation.`,
+    slots: [],
+    conflicts: [],
+    brief: null,
+    reschedule: null,
+    eventDraft: draft,
+    usedModel: false,
+    model: null,
+  };
+}
+
+/** Identifies a clash by its type and the other event involved, not its time. */
+function conflictKey(conflict: AiConflict, eventId: string) {
+  const others = conflict.eventIds.filter((id) => id !== eventId).sort().join("|");
+  return `${conflict.type}:${others}`;
+}
+
+async function buildReschedule(
+  input: AssistantInput,
+  interpretation: Interpretation,
+  timeZone: string,
+): Promise<AssistantResult> {
+  const eventId = input.eventId ?? interpretation.eventId;
+  const event = input.events.find((entry) => entry.id === eventId) ?? null;
+
+  if (!event || event.allDay) {
+    return {
+      intent: "reschedule",
+      headline: "Pick a timed meeting to move",
+      answer:
+        "Select a timed meeting on the calendar first, then preview where it could move. All-day blocks cannot be rescheduled here.",
+      slots: [],
+      conflicts: [],
+      brief: null,
+      reschedule: null,
+      usedModel: false,
+      model: null,
+    };
+  }
+
+  const preferences = normalizePreferences(input.preferences);
+  const minutes = Math.max(
+    5,
+    Math.round(
+      (new Date(event.end).getTime() - new Date(event.start).getTime()) / 60_000,
+    ),
+  );
+  const others = input.events.filter((entry) => entry.id !== event.id);
+  const candidates = findOpenSlots(others, {
+    range: input.range,
+    durationMinutes: minutes,
+    timeZone,
+    avoidLunch: preferences.protectLunch,
+    preferMornings: preferences.preferMornings,
+    preferences,
+    limit: 6,
+  });
+
+  const currentConflicts = detectConflicts(input.events, timeZone).filter((conflict) =>
+    conflict.eventIds.includes(event.id),
+  );
+  const currentKeys = new Set(
+    currentConflicts.map((conflict) => conflictKey(conflict, event.id)),
+  );
+  const currentStart = new Date(event.start).getTime();
+  const currentEnd = new Date(event.end).getTime();
+
+  const options: RescheduleOption[] = candidates
+    .filter((candidate) => {
+      const start = new Date(candidate.start).getTime();
+      const end = new Date(candidate.end).getTime();
+      return start !== currentStart || end !== currentEnd;
+    })
+    .map((candidate) => {
+      const moved = input.events.map((entry) =>
+        entry.id === event.id
+          ? { ...entry, start: candidate.start, end: candidate.end }
+          : entry,
+      );
+      const nextConflicts = detectConflicts(moved, timeZone).filter((conflict) =>
+        conflict.eventIds.includes(event.id),
+      );
+      const nextKeys = new Set(
+        nextConflicts.map((conflict) => conflictKey(conflict, event.id)),
+      );
+      return {
+        ...candidate,
+        fixes: currentConflicts
+          .filter((conflict) => !nextKeys.has(conflictKey(conflict, event.id)))
+          .map((conflict) => conflict.title),
+        creates: nextConflicts
+          .filter((conflict) => !currentKeys.has(conflictKey(conflict, event.id)))
+          .map((conflict) => conflict.title),
+      };
+    })
+    .sort((a, b) => {
+      const rank = (option: RescheduleOption) =>
+        option.score + option.fixes.length * 12 - option.creates.length * 18;
+      return rank(b) - rank(a);
+    })
+    .slice(0, 3);
+
+  const currentLabel = `${fullDayLabel(new Date(event.start), timeZone)}, ${timeLabel(new Date(event.start), timeZone)}–${timeLabel(new Date(event.end), timeZone)}`;
+
+  if (options.length === 0) {
+    return {
+      intent: "reschedule",
+      headline: "No clean alternative",
+      answer: `There is no ${minutes}-minute opening inside your working hours that does not collide with something else, so moving “${event.title}” would create a new problem. Shortening it or widening the dates would give me options.`,
+      slots: [],
+      conflicts: currentConflicts.slice(0, 2),
+      brief: null,
+      reschedule: { eventId: event.id, currentLabel, options: [] },
+      usedModel: false,
+      model: null,
+    };
+  }
+
+  const best = options[0];
+  const effect = best.creates.length
+    ? `it would introduce ${best.creates.length} new clash${best.creates.length === 1 ? "" : "es"}`
+    : best.fixes.length
+      ? `it would clear ${best.fixes.length} existing clash${best.fixes.length === 1 ? "" : "es"}`
+      : "nothing else on the calendar would change";
+
+  const fallback = `“${event.title}” currently sits at ${currentLabel}. The best alternative is ${best.dayLabel}, ${best.timeLabel}: ${effect}. I found ${options.length} option${options.length === 1 ? "" : "s"}; nothing moves until you confirm one.`;
+
+  const narration = await narrate(
+    [
+      `Request: "${input.prompt}"`,
+      `Event: ${event.title}, currently ${currentLabel}.`,
+      `Options (complete list):\n${options
+        .map(
+          (option, index) =>
+            `${index + 1}. ${option.dayLabel} ${option.timeLabel} — fixes: ${option.fixes.join("; ") || "none"}; creates: ${option.creates.join("; ") || "none"}`,
+        )
+        .join("\n")}`,
+      "Recommend one option in two sentences, naming what it fixes or breaks. Do not invent times or meetings.",
+    ].join("\n"),
+    NARRATION_SYSTEM,
+  );
+
+  return {
+    intent: "reschedule",
+    headline: `${options.length} alternative${options.length === 1 ? "" : "s"} for “${event.title}”`,
+    answer: narration ?? fallback,
+    slots: [],
+    conflicts: currentConflicts.slice(0, 2),
+    brief: null,
+    reschedule: { eventId: event.id, currentLabel, options },
     usedModel: Boolean(narration),
     model: narration ? AI_MODEL : null,
   };
@@ -779,5 +1421,8 @@ export async function runAssistant(input: AssistantInput): Promise<AssistantResu
   if (intent === "brief") return buildBrief(input, normalized, timeZone);
   if (intent === "find_time") return buildFindTime(input, normalized, timeZone);
   if (intent === "conflicts") return buildConflicts(input, timeZone);
+  if (intent === "week_plan") return buildWeekPlan(input, timeZone);
+  if (intent === "reschedule") return buildReschedule(input, normalized, timeZone);
+  if (intent === "create_event") return buildCreateEvent(input, normalized, timeZone);
   return buildOverview(input, timeZone);
 }

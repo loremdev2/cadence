@@ -3,6 +3,7 @@
 import {
   ChevronLeft,
   ChevronRight,
+  CircleHelp,
   LayoutGrid,
   Sparkles,
   Rows3,
@@ -10,6 +11,7 @@ import {
 import type { CalendarMode, WeekStats } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
+import { ThemeToggle } from "@/components/theme-toggle";
 
 interface TopBarProps {
   title: string;
@@ -21,6 +23,7 @@ interface TopBarProps {
   onNext: () => void;
   onToday: () => void;
   onAsk: () => void;
+  onTutorial: () => void;
 }
 
 function Dot() {
@@ -37,13 +40,14 @@ export function TopBar({
   onNext,
   onToday,
   onAsk,
+  onTutorial,
 }: TopBarProps) {
   return (
     <header className="border-b border-line px-4 py-4 lg:px-6">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="flex items-center gap-2">
-            <div className="inline-flex rounded-lg border border-line bg-white p-0.5 shadow-sm">
+            <div data-tour="calendar" className="inline-flex rounded-lg border border-line bg-white p-0.5 shadow-sm">
               <button
                 type="button"
                 onClick={() => onViewChange("day")}
@@ -95,6 +99,16 @@ export function TopBar({
         </div>
 
         <div className="flex shrink-0 items-center gap-1.5">
+          <ThemeToggle />
+          <Button
+            variant="secondary"
+            size="icon"
+            onClick={onTutorial}
+            aria-label="Open Cadence tutorial"
+            title="How Cadence works"
+          >
+            <CircleHelp className="h-4 w-4" />
+          </Button>
           <Button variant="secondary" size="sm" onClick={onToday} className="hidden sm:inline-flex">
             Today
           </Button>
@@ -119,6 +133,7 @@ export function TopBar({
           </div>
           <Button
             size="sm"
+            data-tour="assistant-entry"
             onClick={onAsk}
             className="ml-0.5 gap-1.5 xl:hidden"
           >

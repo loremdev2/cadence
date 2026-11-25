@@ -66,8 +66,14 @@ export const CalendarView = forwardRef<CalendarHandle, CalendarViewProps>(
 
     useEffect(() => {
       if (appliedView.current === view) return;
-      appliedView.current = view;
-      apiRef.current?.changeView(view === "day" ? "timeGridDay" : "timeGridWeek");
+      // FullCalendar's React adapter calls flushSync while changing views.
+      // Defer the imperative call out of React's effect/lifecycle phase.
+      const timer = window.setTimeout(() => {
+        if (!apiRef.current) return;
+        appliedView.current = view;
+        apiRef.current.changeView(view === "day" ? "timeGridDay" : "timeGridWeek");
+      }, 0);
+      return () => window.clearTimeout(timer);
     }, [view]);
 
     return (

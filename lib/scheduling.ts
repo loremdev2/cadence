@@ -1,8 +1,10 @@
+import { DEFAULT_PREFERENCES } from "./preferences";
 import type {
   AiConflict,
   AiSlot,
   CalEvent,
   CalendarRange,
+  SchedulingPreferences,
   WeekStats,
 } from "./types";
 import {
@@ -29,6 +31,7 @@ export interface SlotOptions {
   timeZone: string;
   avoidLunch?: boolean;
   preferMornings?: boolean;
+  preferences?: SchedulingPreferences;
   limit?: number;
   now?: Date;
 }
@@ -82,11 +85,16 @@ export function findOpenSlots(events: CalEvent[], options: SlotOptions): AiSlot[
     range,
     durationMinutes,
     timeZone,
-    avoidLunch = true,
-    preferMornings = true,
     limit = 4,
     now = new Date(),
   } = options;
+
+  // Personal rules drive the search; explicit options win over stored ones so
+  // a single request can still ask for mornings you normally avoid.
+  const preferences = { ...DEFAULT_PREFERENCES, ...(options.preferences ?? {}) };
+  const avoidLunch = options.avoidLunch ?? preferences.protectLunch;
+  const preferMornings = options.preferMornings ?? preferences.preferMornings;
+  const bufferMinutes = preferences.bufferMinutes;
 
   const rangeStart = new Date(range.start);
   const rangeEnd = new Date(range.end);
@@ -98,7 +106,13 @@ export function findOpenSlots(events: CalEvent[], options: SlotOptions): AiSlot[
     return [];
   }
 
-  const busy = mergeIntervals(busyIntervals(events));
+  const bufferMs = bufferMinutes * 60_000;
+  const busy = mergeIntervals(
+    busyIntervals(events).map((interval) => ({
+      start: interval.start - bufferMs,
+      end: interval.end + bufferMs,
+    })),
+  );
   const slots: AiSlot[] = [];
   const durationMs = durationMinutes * 60_000;
 
@@ -107,8 +121,15 @@ export function findOpenSlots(events: CalEvent[], options: SlotOptions): AiSlot[
 
   while (dayCursor.getTime() < rangeEnd.getTime() && guard < 62) {
     guard += 1;
-    const dayStart = zonedHour(dayCursor, WORKDAY_START_HOUR, timeZone);
-    const dayEnd = zonedHour(dayCursor, WORKDAY_END_HOUR, timeZone);
+    const dayKey = dateKey(dayCursor, timeZone);
+    const dayOfWeek = new Date(`${dayKey}T12:00:00Z`).getUTCDay();
+    const weekend = dayOfWeek === 0 || dayOfWeek === 6;
+    if (weekend && !preferences.allowWeekends) {
+      dayCursor = addZonedDays(dayCursor, 1, timeZone);
+      continue;
+    }
+    const dayStart = zonedHour(dayCursor, preferences.workdayStart, timeZone);
+    const dayEnd = zonedHour(dayCursor, preferences.workdayEnd, timeZone);
     const windowStart = Math.max(
       dayStart.getTime(),
       rangeStart.getTime(),
@@ -144,8 +165,8 @@ export function findOpenSlots(events: CalEvent[], options: SlotOptions): AiSlot[
     let end = new Date(gapStart + durationMs);
 
     if (avoidLunch) {
-      const lunchStart = zonedHour(start, LUNCH_START_HOUR, timeZone).getTime();
-      const lunchEnd = zonedHour(start, LUNCH_END_HOUR, timeZone).getTime();
+      const lunchStart = zonedHour(start, preferences.lunchStart, timeZone).getTime();
+      const lunchEnd = zonedHour(start, preferences.lunchEnd, timeZone).getTime();
       if (start.getTime() < lunchEnd && end.getTime() > lunchStart) {
         const afterLunch = lunchEnd;
         if (gapEnd - afterLunch >= durationMs) {
@@ -173,10 +194,10 @@ export function findOpenSlots(events: CalEvent[], options: SlotOptions): AiSlot[
       score += 10;
       reasons.push(`${durationLabel(gapMinutes - durationMinutes)} of slack around it`);
     }
-    if (prevEnd && (gapStart - prevEnd) / 60_000 >= MIN_BUFFER_MINUTES) {
+    if (prevEnd && (gapStart - prevEnd) / 60_000 >= bufferMinutes) {
       score += 8;
     }
-    if (Number.isFinite(nextStart) && (nextStart - gapEnd) / 60_000 >= MIN_BUFFER_MINUTES) {
+    if (Number.isFinite(nextStart) && (nextStart - gapEnd) / 60_000 >= bufferMinutes) {
       score += 8;
       reasons.push("a clean hand-off to the next meeting");
     }
@@ -193,8 +214,7 @@ export function findOpenSlots(events: CalEvent[], options: SlotOptions): AiSlot[
       reasons.push("Friday afternoon, so it is easy to lose");
     }
     if (weekday === 0 || weekday === 6) {
-      // Business context: weekends are available but should not outrank a
-      // weekday opening unless that is all there is.
+      // Only reachable when weekends are allowed: still rank below weekdays.
       score -= 24;
     }
     if (weekday === 1) score += 4;

@@ -11,6 +11,7 @@ import {
   Sparkles,
 } from "lucide-react";
 import type { AssistantIntent } from "@/lib/ai/assistant";
+import { DEFAULT_PREFERENCES, loadPreferences } from "@/lib/preferences";
 import { computeWeekStats } from "@/lib/scheduling";
 import type {
   AiSlot,
@@ -18,6 +19,10 @@ import type {
   CalEvent,
   CalendarMode,
   CalendarRange,
+  EventDraft,
+  RescheduleOption,
+  ReschedulePreview,
+  SchedulingPreferences,
   Viewer,
 } from "@/lib/types";
 import { Button, buttonVariants } from "@/components/ui/button";
@@ -27,6 +32,7 @@ import { TopBar } from "./top-bar";
 import { DemoBanner } from "./demo-banner";
 import { AssistantPanel, type ChatMessage } from "./assistant-panel";
 import { MeetingPanel } from "./meeting-panel";
+import { OnboardingTour } from "./onboarding-tour";
 import { RightPanel, type PanelTab } from "./right-panel";
 
 function newId() {
@@ -67,6 +73,7 @@ export function CalendarWorkspace({ viewer }: { viewer: Viewer }) {
   const [tab, setTab] = useState<PanelTab>("assistant");
   const [sheetOpen, setSheetOpen] = useState(false);
   const [bannerOpen, setBannerOpen] = useState(true);
+  const [tourOpen, setTourOpen] = useState(false);
 
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [pending, setPending] = useState(false);
@@ -76,7 +83,49 @@ export function CalendarWorkspace({ viewer }: { viewer: Viewer }) {
   const [briefLoading, setBriefLoading] = useState(false);
   const [briefError, setBriefError] = useState<string | null>(null);
 
+  const [preferences, setPreferences] =
+    useState<SchedulingPreferences>(DEFAULT_PREFERENCES);
+  const [reschedule, setReschedule] = useState<ReschedulePreview | null>(null);
+  const [rescheduleLoading, setRescheduleLoading] = useState(false);
+  const [rescheduleError, setRescheduleError] = useState<string | null>(null);
+  const [movingStart, setMovingStart] = useState<string | null>(null);
+  const [moveNotice, setMoveNotice] = useState<string | null>(null);
+
   const calendarRef = useRef<CalendarHandle>(null);
+
+  useEffect(() => {
+    const key = `cadence.tutorial.v1.${viewer.userId ?? "demo"}`;
+    try {
+      if (window.localStorage.getItem(key) !== "complete") setTourOpen(true);
+    } catch {
+      setTourOpen(true);
+    }
+  }, [viewer.userId]);
+
+  const closeTour = useCallback(() => {
+    const key = `cadence.tutorial.v1.${viewer.userId ?? "demo"}`;
+    try {
+      window.localStorage.setItem(key, "complete");
+    } catch {
+      // Dismiss the guide for this page view if browser storage is unavailable.
+    }
+    setTourOpen(false);
+  }, [viewer.userId]);
+
+  const prepareTourStep = useCallback((step: number) => {
+    if (step === 2 && window.matchMedia("(max-width: 1279px)").matches) {
+      setTab("assistant");
+      setSheetOpen(true);
+    } else if (step !== 2) {
+      setSheetOpen(false);
+    }
+  }, []);
+
+  // Personal rules live in the browser, so demo mode works without pairing them
+  // to an account.
+  useEffect(() => {
+    setPreferences(loadPreferences());
+  }, []);
   const [timeZone] = useState(() => {
     try {
       return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
@@ -173,6 +222,7 @@ export function CalendarWorkspace({ viewer }: { viewer: Viewer }) {
             events,
             eventId: options?.eventId ?? selectedId,
             intent: options?.intent ?? null,
+            preferences,
           }),
         });
         const payload = await response.json();
@@ -188,6 +238,11 @@ export function CalendarWorkspace({ viewer }: { viewer: Viewer }) {
           setBrief(result);
           setBriefEventId(result.brief.eventId);
           setSelectedId(result.brief.eventId);
+        }
+        if (result.reschedule) {
+          setReschedule(result.reschedule);
+          setSelectedId(result.reschedule.eventId);
+          setTab("meeting");
         }
       } catch (cause) {
         setMessages((previous) => [
@@ -206,11 +261,15 @@ export function CalendarWorkspace({ viewer }: { viewer: Viewer }) {
         setPending(false);
       }
     },
-    [pending, mode, timeZone, range, events, selectedId],
+    [pending, mode, timeZone, range, events, selectedId, preferences],
   );
 
   const bookSlot = useCallback(
-    async (slot: AiSlot, title: string) => {
+    async (
+      slot: AiSlot,
+      title: string,
+      details?: { description?: string; location?: string; attendees?: string[] },
+    ) => {
       const response = await fetch("/api/calendar/events", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -220,6 +279,9 @@ export function CalendarWorkspace({ viewer }: { viewer: Viewer }) {
           start: slot.start,
           end: slot.end,
           timeZone,
+          description: details?.description,
+          location: details?.location,
+          attendees: details?.attendees,
         }),
       });
       const payload = await response.json().catch(() => null);
@@ -233,6 +295,53 @@ export function CalendarWorkspace({ viewer }: { viewer: Viewer }) {
     [mode, timeZone],
   );
 
+  const resolveEventDraft = useCallback(
+    async (
+      draft: EventDraft,
+      change: {
+        start?: string | null;
+        durationMinutes?: number | null;
+        title?: string;
+        agenda?: string;
+        description?: string;
+        location?: string;
+        attendees?: string[];
+      },
+    ): Promise<AssistantResult> => {
+      const response = await fetch("/api/ai/assistant", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          prompt: `Schedule ${change.title ?? draft.title}`,
+          mode,
+          timeZone,
+          view: range,
+          events,
+          intent: "create_event",
+          preferences,
+          eventDraft: {
+            title: change.title ?? draft.title,
+            agenda: change.agenda ?? draft.agenda,
+            description: change.description ?? draft.description,
+            location: change.location ?? draft.location,
+            attendees: change.attendees ?? draft.attendees,
+            requestedDate: draft.requestedDate,
+            requestedPeriod: draft.requestedPeriod,
+            start: change.start === undefined ? draft.start : change.start,
+            durationMinutes:
+              change.durationMinutes === undefined
+                ? draft.durationMinutes
+                : change.durationMinutes,
+          },
+        }),
+      });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) throw new Error(payload?.error ?? "Could not check that time.");
+      return payload as AssistantResult;
+    },
+    [mode, timeZone, range, events, preferences],
+  );
+
   const goLive = useCallback(() => {
     if (viewer.connected) {
       setMode("live");
@@ -240,7 +349,7 @@ export function CalendarWorkspace({ viewer }: { viewer: Viewer }) {
       return;
     }
     window.location.href = viewer.authConfigured
-      ? "/auth/google/start?next=/"
+      ? "/auth/google/start?next=/calendar"
       : "/login";
   }, [viewer.connected, viewer.authConfigured]);
 
@@ -261,6 +370,7 @@ export function CalendarWorkspace({ viewer }: { viewer: Viewer }) {
             events,
             eventId: event.id,
             intent: "brief",
+            preferences,
           }),
         });
         const payload = await response.json();
@@ -279,11 +389,90 @@ export function CalendarWorkspace({ viewer }: { viewer: Viewer }) {
         setBriefLoading(false);
       }
     },
-    [mode, timeZone, range, events],
+    [mode, timeZone, range, events, preferences],
+  );
+
+  const previewMove = useCallback(
+    async (event: CalEvent) => {
+      setRescheduleLoading(true);
+      setRescheduleError(null);
+      setMoveNotice(null);
+      try {
+        const response = await fetch("/api/ai/assistant", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            prompt: `What if I moved ${event.title}?`,
+            mode,
+            timeZone,
+            view: range,
+            events,
+            eventId: event.id,
+            intent: "reschedule",
+            preferences,
+          }),
+        });
+        const payload = await response.json().catch(() => null);
+        if (!response.ok) {
+          throw new Error(payload?.error ?? "Could not preview alternatives.");
+        }
+        const preview = payload?.reschedule as ReschedulePreview | null;
+        if (!preview) {
+          throw new Error(payload?.answer ?? "No alternatives were available.");
+        }
+        setReschedule(preview);
+      } catch (cause) {
+        setRescheduleError(
+          cause instanceof Error ? cause.message : "Could not preview alternatives.",
+        );
+      } finally {
+        setRescheduleLoading(false);
+      }
+    },
+    [mode, timeZone, range, events, preferences],
+  );
+
+  const moveEvent = useCallback(
+    async (event: CalEvent, option: RescheduleOption) => {
+      setMovingStart(option.start);
+      setRescheduleError(null);
+      setMoveNotice(null);
+      try {
+        const response = await fetch("/api/calendar/events", {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            mode,
+            eventId: event.id,
+            start: option.start,
+            end: option.end,
+            timeZone,
+          }),
+        });
+        const payload = await response.json().catch(() => null);
+        if (!response.ok) {
+          throw new Error(payload?.error ?? "Could not move the event.");
+        }
+        setReschedule(null);
+        setMoveNotice(`Moved to ${option.dayLabel}, ${option.timeLabel}.`);
+        setReloadToken((token) => token + 1);
+        calendarRef.current?.gotoDate(new Date(option.start));
+      } catch (cause) {
+        setRescheduleError(
+          cause instanceof Error ? cause.message : "Could not move the event.",
+        );
+      } finally {
+        setMovingStart(null);
+      }
+    },
+    [mode, timeZone],
   );
 
   const handleSelectEvent = useCallback((id: string) => {
     setSelectedId(id);
+    setReschedule(null);
+    setRescheduleError(null);
+    setMoveNotice(null);
     setTab("meeting");
     if (typeof window !== "undefined" && window.matchMedia("(max-width: 1279px)").matches) {
       setSheetOpen(true);
@@ -311,7 +500,7 @@ export function CalendarWorkspace({ viewer }: { viewer: Viewer }) {
       return;
     }
     window.location.href = viewer.authConfigured
-      ? "/auth/google/start?next=/"
+      ? "/auth/google/start?next=/calendar"
       : "/login";
   }, [mode, viewer.connected, viewer.authConfigured]);
 
@@ -343,6 +532,7 @@ export function CalendarWorkspace({ viewer }: { viewer: Viewer }) {
           onAsk={(prompt) => ask(prompt)}
           onJump={jumpTo}
           onBookSlot={bookSlot}
+          onResolveEvent={resolveEventDraft}
           onGoLive={goLive}
         />
       }
@@ -352,7 +542,16 @@ export function CalendarWorkspace({ viewer }: { viewer: Viewer }) {
           brief={activeBrief}
           briefLoading={briefLoading}
           briefError={briefError}
+          reschedule={reschedule}
+          rescheduleLoading={rescheduleLoading}
+          rescheduleError={rescheduleError}
+          moveNotice={moveNotice}
+          movingStart={movingStart}
+          live={mode === "live"}
+          canMove={mode === "live" && viewer.canWrite}
           onPrepare={prepareBrief}
+          onPreviewMove={previewMove}
+          onMove={moveEvent}
         />
       }
     />
@@ -376,18 +575,19 @@ export function CalendarWorkspace({ viewer }: { viewer: Viewer }) {
 
       <div className="flex min-w-0 flex-1 flex-col">
         <div className="flex items-center justify-between border-b border-line px-4 py-2.5 lg:hidden">
-          <Link href="/" aria-label="Cadence home">
+          <Link href="/calendar" aria-label="Cadence calendar">
             <Brand />
           </Link>
           <div className="flex items-center gap-1">
             <Link
               href="/settings"
+              data-tour="settings"
               aria-label="Settings"
               className={buttonVariants({ variant: "ghost", size: "icon" })}
             >
               <Settings2 className="h-4 w-4" />
             </Link>
-            <Button size="sm" onClick={openAssistant} className="gap-1.5">
+            <Button size="sm" data-tour="assistant-entry" onClick={openAssistant} className="gap-1.5">
               <Sparkles className="h-3.5 w-3.5" />
               Ask
             </Button>
@@ -404,6 +604,7 @@ export function CalendarWorkspace({ viewer }: { viewer: Viewer }) {
           onNext={() => calendarRef.current?.next()}
           onToday={() => calendarRef.current?.today()}
           onAsk={openAssistant}
+          onTutorial={() => setTourOpen(true)}
         />
 
         {loading && <div className="h-0.5 w-full animate-pulse bg-spruce/30" />}
@@ -446,7 +647,7 @@ export function CalendarWorkspace({ viewer }: { viewer: Viewer }) {
                       )}
                       {reconnect && (
                         <a
-                          href="/auth/google/start?next=/"
+                          href="/auth/google/start?next=/calendar"
                           className={buttonVariants({ size: "sm", variant: "subtle" })}
                         >
                           Reconnect
@@ -488,6 +689,12 @@ export function CalendarWorkspace({ viewer }: { viewer: Viewer }) {
           </div>
         </div>
       )}
+
+      <OnboardingTour
+        open={tourOpen}
+        onClose={closeTour}
+        onStepChange={prepareTourStep}
+      />
     </div>
   );
 }

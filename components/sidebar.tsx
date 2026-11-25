@@ -73,7 +73,7 @@ export function Sidebar({
   const pathname = usePathname();
 
   const connectHref = viewer.authConfigured
-    ? "/auth/google/start?next=/"
+    ? "/auth/google/start?next=/calendar"
     : "/login";
 
   const navItem = (active: boolean) =>
@@ -87,21 +87,21 @@ export function Sidebar({
   return (
     <aside className="hidden w-[248px] shrink-0 flex-col border-r border-line bg-[#F5F2EA] px-3 pb-3 pt-4 lg:flex">
       <div className="px-1.5">
-        <Link href="/" aria-label="Cadence home">
+        <Link href="/calendar" aria-label="Cadence calendar">
           <Brand />
         </Link>
       </div>
 
       <nav className="mt-6 space-y-0.5">
-        <Link href="/" className={navItem(pathname === "/")}>
+        <Link href="/calendar" className={navItem(pathname === "/calendar")}>
           <CalendarDays className="h-4 w-4" />
           Calendar
         </Link>
-        <button type="button" onClick={onOpenAssistant} className={cn(navItem(false), "w-full")}>
+        <button type="button" data-tour="assistant-entry" onClick={onOpenAssistant} className={cn(navItem(false), "w-full")}>
           <Sparkles className="h-4 w-4" />
           Assistant
         </button>
-        <Link href="/settings" className={navItem(pathname === "/settings")}>
+        <Link href="/settings" data-tour="settings" className={navItem(pathname === "/settings")}>
           <Settings2 className="h-4 w-4" />
           Settings
         </Link>

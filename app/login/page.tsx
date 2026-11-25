@@ -58,7 +58,7 @@ export default async function LoginPage({
   searchParams: Promise<{ error?: string | string[] }>;
 }) {
   const viewer = await getViewer();
-  if (viewer.signedIn) redirect("/");
+  if (viewer.signedIn) redirect("/calendar");
 
   const params = await searchParams;
   const errorKey = typeof params.error === "string" ? params.error : undefined;
@@ -174,7 +174,7 @@ export default async function LoginPage({
           <div className="mt-6 space-y-2">
             {viewer.authConfigured ? (
               <a
-                href="/auth/google/start?next=/"
+                href="/auth/google/start?next=/calendar"
                 className={buttonVariants({ size: "lg", className: "w-full gap-2" })}
               >
                 <GoogleMark />
@@ -193,7 +193,7 @@ export default async function LoginPage({
             )}
 
             <Link
-              href="/"
+              href="/calendar"
               className={buttonVariants({
                 variant: "secondary",
                 size: "lg",

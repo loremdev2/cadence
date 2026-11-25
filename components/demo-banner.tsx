@@ -16,7 +16,7 @@ export function DemoBanner({
         Demo calendar — a sample week for Maya Chen at Meridian Labs.
       </span>
       <a
-        href={authConfigured ? "/auth/google/start?next=/" : "/login"}
+        href={authConfigured ? "/auth/google/start?next=/calendar" : "/login"}
         className="ml-auto hidden shrink-0 font-medium underline underline-offset-2 hover:text-[#5F4614] sm:inline"
       >
         Connect Google Calendar

@@ -11,12 +11,15 @@ import {
   KeyRound,
   LogOut,
   ShieldCheck,
+  SlidersHorizontal,
   Sparkles,
 } from "lucide-react";
 import { Brand } from "@/components/sidebar";
 import { Badge } from "@/components/ui/badge";
 import { buttonVariants } from "@/components/ui/button";
 import { DisconnectButton } from "@/components/disconnect-button";
+import { PreferencesForm } from "@/components/preferences-form";
+import { ThemeToggle } from "@/components/theme-toggle";
 import { getViewer } from "@/lib/viewer";
 import { initials } from "@/lib/utils";
 
@@ -127,13 +130,16 @@ export default async function SettingsPage({
           <Link href="/" aria-label="Cadence home">
             <Brand />
           </Link>
-          <Link
-            href="/"
-            className={buttonVariants({ variant: "ghost", size: "sm", className: "gap-1.5" })}
-          >
-            <ArrowLeft className="h-3.5 w-3.5" />
-            Back to calendar
-          </Link>
+          <div className="flex items-center gap-1.5">
+            <ThemeToggle />
+            <Link
+              href="/calendar"
+              className={buttonVariants({ variant: "ghost", size: "sm", className: "gap-1.5" })}
+            >
+              <ArrowLeft className="h-3.5 w-3.5" />
+              Back to calendar
+            </Link>
+          </div>
         </div>
       </header>
 
@@ -286,9 +292,18 @@ export default async function SettingsPage({
 
             <p className="mt-3 flex items-start gap-1.5 text-[10.5px] leading-relaxed text-muted">
               <ShieldCheck className="mt-0.5 h-3 w-3 shrink-0" />
-              Cadence adds only a window you approve. It never edits, moves or
-              deletes an event, and it never invites anyone.
+              Cadence adds or moves events only after you confirm. It only invites
+              people whose email addresses you add to a new event draft; Google
+              sends those invitations when the event is created.
             </p>
+          </Section>
+
+          <Section
+            icon={SlidersHorizontal}
+            title="Scheduling preferences"
+            description="Cadence ranks every suggested window against these rules. They are stored in this browser, so demo mode works without an account."
+          >
+            <PreferencesForm />
           </Section>
 
           <Section
@@ -302,7 +317,7 @@ export default async function SettingsPage({
                 calendar. Every number is computed from the sample events.
               </p>
               <Link
-                href="/"
+                href="/calendar"
                 className={buttonVariants({ variant: "secondary", size: "sm" })}
               >
                 Open demo calendar
@@ -358,8 +373,10 @@ export default async function SettingsPage({
         </div>
 
         <p className="mt-6 text-[10.5px] leading-relaxed text-muted">
-          The app writes to Google only when you add a suggested window. Editing
-          existing events and coworker availability are planned next steps.
+          The app writes to Google only after you confirm adding or moving an event.
+          New event drafts can include a description, location and email invitees;
+          invitees are notified by Google when included. Coworker availability is
+          a planned next step.
         </p>
       </div>
     </main>

@@ -20,7 +20,7 @@ const THEME_KEY = "cadence.theme.v1";
 const ThemeContext = createContext<ThemeContextValue | null>(null);
 
 export function ThemeProvider({ children }: { children: React.ReactNode }) {
-  const [theme, setTheme] = useState<Theme>("light");
+  const [theme, setTheme] = useState<Theme>("dark");
 
   useEffect(() => {
     const initial = document.documentElement.classList.contains("dark")

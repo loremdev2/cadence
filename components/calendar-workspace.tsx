@@ -8,7 +8,6 @@ import {
   ArrowRight,
   RefreshCw,
   Settings2,
-  Sparkles,
 } from "lucide-react";
 import type { AssistantIntent } from "@/lib/ai/assistant";
 import { DEFAULT_PREFERENCES, loadPreferences } from "@/lib/preferences";
@@ -63,6 +62,7 @@ function titleFor(anchor: Date, view: "day" | "week") {
 export function CalendarWorkspace({ viewer }: { viewer: Viewer }) {
   const [mode, setMode] = useState<CalendarMode>(viewer.connected ? "live" : "demo");
   const [view, setView] = useState<"day" | "week">("week");
+  const [viewChosen, setViewChosen] = useState(false);
   const [anchor, setAnchor] = useState<Date>(() => new Date());
   const [range, setRange] = useState<CalendarRange>(() => weekRange(new Date()));
   const [events, setEvents] = useState<CalEvent[]>([]);
@@ -92,6 +92,16 @@ export function CalendarWorkspace({ viewer }: { viewer: Viewer }) {
   const [moveNotice, setMoveNotice] = useState<string | null>(null);
 
   const calendarRef = useRef<CalendarHandle>(null);
+
+  useEffect(() => {
+    const viewport = window.matchMedia("(max-width: 767px)");
+    const syncViewToViewport = () => {
+      if (!viewChosen) setView(viewport.matches ? "day" : "week");
+    };
+    syncViewToViewport();
+    viewport.addEventListener("change", syncViewToViewport);
+    return () => viewport.removeEventListener("change", syncViewToViewport);
+  }, [viewChosen]);
 
   useEffect(() => {
     const key = `cadence.tutorial.v1.${viewer.userId ?? "demo"}`;
@@ -576,7 +586,7 @@ export function CalendarWorkspace({ viewer }: { viewer: Viewer }) {
       <div className="flex min-w-0 flex-1 flex-col">
         <div className="flex items-center justify-between border-b border-line px-4 py-2.5 lg:hidden">
           <Link href="/calendar" aria-label="Cadence calendar">
-            <Brand />
+            <Brand hideWordmarkOnMobile />
           </Link>
           <div className="flex items-center gap-1">
             <Link
@@ -587,10 +597,6 @@ export function CalendarWorkspace({ viewer }: { viewer: Viewer }) {
             >
               <Settings2 className="h-4 w-4" />
             </Link>
-            <Button size="sm" data-tour="assistant-entry" onClick={openAssistant} className="gap-1.5">
-              <Sparkles className="h-3.5 w-3.5" />
-              Ask
-            </Button>
           </div>
         </div>
 
@@ -599,7 +605,10 @@ export function CalendarWorkspace({ viewer }: { viewer: Viewer }) {
           view={view}
           mode={mode}
           stats={stats}
-          onViewChange={setView}
+          onViewChange={(nextView) => {
+            setViewChosen(true);
+            setView(nextView);
+          }}
           onPrev={() => calendarRef.current?.prev()}
           onNext={() => calendarRef.current?.next()}
           onToday={() => calendarRef.current?.today()}

@@ -128,7 +128,7 @@ export default async function SettingsPage({
       <header className="border-b border-line bg-paper/90 px-4 py-3 backdrop-blur lg:px-8">
         <div className="mx-auto flex max-w-3xl items-center justify-between">
           <Link href="/" aria-label="Cadence home">
-            <Brand />
+            <Brand hideWordmarkOnMobile />
           </Link>
           <div className="flex items-center gap-1.5">
             <ThemeToggle />

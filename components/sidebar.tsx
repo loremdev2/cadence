@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import Image from "next/image";
 import { usePathname } from "next/navigation";
 import {
   AlertTriangle,
@@ -35,12 +36,25 @@ function BrandMark({ className }: { className?: string }) {
   );
 }
 
-export function Brand({ compact = false }: { compact?: boolean }) {
+export function Brand({
+  compact = false,
+  hideWordmarkOnMobile = false,
+}: {
+  compact?: boolean;
+  hideWordmarkOnMobile?: boolean;
+}) {
   return (
     <div className="flex items-center gap-2.5">
       <BrandMark />
+      <Image
+        src="/cc-logo.png"
+        alt="CC logo"
+        width={36}
+        height={36}
+        className="h-8 w-8 rounded-lg bg-black object-cover object-center ring-1 ring-black/10 sm:h-9 sm:w-9"
+      />
       {!compact && (
-        <div className="leading-none">
+        <div className={`leading-none ${hideWordmarkOnMobile ? "hidden sm:block" : ""}`}>
           <div className="font-serif text-[19px] tracking-[-0.01em]">Cadence</div>
           <div className="mt-1 text-[8.5px] uppercase tracking-[0.2em] text-muted">
             calendar intelligence

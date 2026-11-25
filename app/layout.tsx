@@ -33,7 +33,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         <script
           dangerouslySetInnerHTML={{
             __html:
-              'try{if(localStorage.getItem("cadence.theme.v1")==="dark"){document.documentElement.classList.add("dark")}}catch(e){}',
+              'try{var cadenceTheme=localStorage.getItem("cadence.theme.v1");if(cadenceTheme!=="light"){document.documentElement.classList.add("dark")}}catch(e){document.documentElement.classList.add("dark")}',
           }}
         />
       </head>

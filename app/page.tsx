@@ -20,7 +20,7 @@ export default function HomePage() {
   return (
     <main className="min-h-dvh overflow-hidden bg-paper text-ink">
       <header className="relative z-10 mx-auto flex max-w-7xl items-center justify-between px-5 py-5 sm:px-8 lg:px-12">
-        <Link href="/" aria-label="Cadence home"><Brand /></Link>
+        <Link href="/" aria-label="Cadence home"><Brand hideWordmarkOnMobile /></Link>
         <nav className="flex items-center gap-2 sm:gap-3">
           <Link href="#how-it-works" className="hidden px-3 py-2 text-[12px] text-ink-soft transition-colors hover:text-ink sm:inline-flex">
             How it works
@@ -79,21 +79,21 @@ export default function HomePage() {
                 </div>
               </div>
 
-              <div className="grid grid-cols-[42px_repeat(5,minmax(0,1fr))] border-b border-line bg-panel px-3 py-2.5 text-center sm:grid-cols-[52px_repeat(5,minmax(0,1fr))] sm:px-4">
+              <div className="grid grid-cols-[38px_repeat(3,minmax(0,1fr))] border-b border-line bg-panel px-3 py-2.5 text-center sm:grid-cols-[52px_repeat(5,minmax(0,1fr))] sm:px-4">
                 <span />
                 {["MON", "TUE", "WED", "THU", "FRI"].map((day, index) => (
-                  <div key={day} className="text-[8px] tracking-[0.12em] text-muted">
+                  <div key={day} className={`text-[8px] tracking-[0.12em] text-muted ${index < 2 ? "hidden sm:block" : ""}`}>
                     {day}<span className={`mt-1 block text-[12px] font-medium tracking-normal ${index === 2 ? "text-spruce" : "text-ink"}`}>{[16, 17, 18, 19, 20][index]}</span>
                   </div>
                 ))}
               </div>
 
-              <div className="grid grid-cols-[42px_repeat(5,minmax(0,1fr))] bg-panel px-3 py-3 sm:grid-cols-[52px_repeat(5,minmax(0,1fr))] sm:px-4">
+              <div className="grid grid-cols-[38px_repeat(3,minmax(0,1fr))] bg-panel px-3 py-3 sm:grid-cols-[52px_repeat(5,minmax(0,1fr))] sm:px-4">
                 <div className="flex flex-col justify-between pb-1 pr-2 text-[8px] text-muted">
                   <span>9 AM</span><span>11 AM</span><span>1 PM</span><span>3 PM</span><span>5 PM</span>
                 </div>
                 {[0, 1, 2, 3, 4].map((day) => (
-                  <div key={day} className="relative h-[208px] border-l border-dashed border-line px-1.5 sm:px-2">
+                  <div key={day} className={`relative h-[180px] border-l border-dashed border-line px-1.5 sm:h-[208px] sm:px-2 ${day < 2 ? "hidden sm:block" : ""}`}>
                     <span className="absolute inset-x-0 top-[25%] border-t border-line/60" />
                     <span className="absolute inset-x-0 top-[50%] border-t border-line/60" />
                     <span className="absolute inset-x-0 top-[75%] border-t border-line/60" />

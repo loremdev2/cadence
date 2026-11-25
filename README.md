@@ -1,6 +1,6 @@
 # Cadence — calendar intelligence
 
-A Next.js app that reads a Google Calendar read-only and suggests how to improve the week: open focus time, meeting briefs, and conflict fixes. Every result is a suggestion — nothing is written back to Google.
+A Next.js app that reads a Google Calendar and suggests how to improve the week: open focus time, meeting briefs, and conflict fixes. Every result is a suggestion; the only write is a window you explicitly add, which becomes one event on your own calendar.
 
 **Demo mode works with no credentials at all.** The calendar, slot finder, conflict detector and assistant all run against a seeded business week until you connect a real calendar.
 
@@ -11,7 +11,7 @@ A Next.js app that reads a Google Calendar read-only and suggests how to improve
 - FullCalendar 6 for the day/week grid
 - **Google OAuth directly** (authorization code + PKCE), with the app's own HMAC-signed session cookie
 - Postgres on Supabase, used as a database only: no Supabase Auth, no Supabase key in the browser
-- Google Calendar API v3, `events.list` with `calendar.events.readonly`
+- Google Calendar API v3, `events.list` + `events.insert` with `calendar.events`
 - Vercel AI SDK 5 + `@openrouter/ai-sdk-provider`
 
 ## Run locally
@@ -45,7 +45,7 @@ Never prefix a secret with `NEXT_PUBLIC_`. Never commit `.env.local`.
 
 ## How sign-in works
 
-1. `/auth/google/start` generates a random `state` and a PKCE verifier, stores both in a signed, HttpOnly cookie that expires in ten minutes, and redirects to Google with the read-only calendar scope.
+1. `/auth/google/start` generates a random `state` and a PKCE verifier, stores both in a signed, HttpOnly cookie that expires in ten minutes, and redirects to Google with the calendar event scope.
 2. Google returns to `/auth/callback`. The route verifies the state against that cookie, exchanges the code using the PKCE verifier, and verifies the returned ID token (audience, issuer, expiry, verified email).
 3. The user row is upserted by Google `sub`, the refresh and access tokens are encrypted with AES-256-GCM, and a signed session cookie (`cadence_session`, HttpOnly, SameSite=Lax, `Secure` in production, 30 days) is issued.
 4. Every later request reads that cookie. There is no session lookup in a third-party auth service, and no browser-side auth SDK.
@@ -68,8 +68,8 @@ If you previously ran the Supabase-Auth version of the migration, drop `public.c
 
 1. Create/select a Google Cloud project and enable the **Google Calendar API**.
 2. Configure the **OAuth consent screen** and add the scopes
-   `https://www.googleapis.com/auth/calendar.events.readonly`, `openid`,
-   `email`, `profile`.
+   `https://www.googleapis.com/auth/calendar.events` (read and write events),
+   `openid`, `email`, `profile`.
 3. Add test users while the app is in Testing.
 4. Create an **OAuth client ID → Web application**:
    - Authorized redirect URI: `http://localhost:3000/auth/callback`
@@ -120,7 +120,7 @@ app/
   auth/google/start/route.ts   Google OAuth start (state + PKCE)
   auth/callback/route.ts       verify state, exchange code, store tokens, issue session
   auth/signout/route.ts        clear the session cookie
-  api/calendar/events/route.ts demo or Google events for a range
+  api/calendar/events/route.ts demo or Google events for a range; POST adds one event
   api/calendar/disconnect/route.ts
   api/ai/assistant/route.ts    validated assistant requests
 components/
@@ -134,7 +134,7 @@ lib/
   timezone.ts                  Intl-based zoned date math
   demo-data.ts                 seeded week
   ai/assistant.ts              interpretation, narration, fallbacks
-  google/calendar.ts           token refresh + events.list + mapping
+  google/calendar.ts           token refresh + events.list/insert + mapping
   google/oauth.ts              auth URL, PKCE exchange, ID token verification
   session.ts                   signed session + OAuth state cookies
   signed-cookie.ts             HMAC sign/verify helpers
@@ -143,11 +143,19 @@ lib/
 supabase/migrations/0001_calendar_connections.sql
 ```
 
+## Writing back to Google
+
+A suggested window in the assistant has an **Add to Google Calendar** button. It posts the slot to `POST /api/calendar/events`, which validates the range (5 minutes to 12 hours), requires a same-origin request and a signed-in session, then inserts the event on the viewer's `primary` calendar with `sendUpdates=none`.
+
+Deliberately narrow: the event has a title, the slot's start/end and the viewer's timezone. No attendees are sent, so Google invites nobody, and there is no edit or delete path. Creating requires the `calendar.events` grant — a connection made under the old read-only scope still reads fine, and the UI offers **Reconnect** to approve write access.
+
+Demo mode never writes: the button only appears on the live calendar.
+
 ## Scope
 
-In: read-only Google Calendar, demo mode, day/week view, find time, meeting briefs, conflict review, settings.
+In: Google Calendar read + add, demo mode, day/week view, find time, meeting briefs, conflict review, settings.
 
-Out: creating/editing/deleting events, inviting people, coworker availability, notifications, multiple calendars.
+Out: editing/deleting events, inviting people, coworker availability, notifications, multiple calendars.
 
 Calendar scopes can require Google verification for public use; while the consent screen is in Testing, only listed test users can sign in, and refresh tokens may expire after about seven days. Demo mode keeps the app reviewable either way.
 # cadence
